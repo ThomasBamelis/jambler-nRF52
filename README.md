@@ -34,3 +34,4 @@ Now you can use gdb as normal, setting breakpoints like `break main` and `contin
 
 However, there are quite a lot of commands to pass to gdb, so a .gdb file has been provided to easily execute gdb with `gdb-multiarch -q -x jlink.gdb` from the root directory of the project.
 This will drop you at the start of the execution of the binary, halted.
+Or by running `cargo run`, which will compile and drop you in the gdb terminal if a valid JLinkGDBServer has been set up.
