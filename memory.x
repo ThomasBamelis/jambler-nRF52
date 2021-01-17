@@ -1,5 +1,19 @@
 
 /* Linker script for the nRF52 - WITHOUT SOFT DEVICE */
+/* TODO 
+   I think changing the flash origin to 0x4000 should make all this compatible with the adafruit bootloader.
+   
+   From the adafruit website about the u2f bootloader for flashing using bossac like arduino does:
+
+   For M4 boards, which have a 16kB bootloader, you must specify -offset=0x4000, for example:
+
+   bossac -p=/dev/cu.usbmodem14301 -e -w -v -R --offset=0x4000 adafruit-circuitpython-feather_m4_express-3.0.0.bin
+
+   This will erase the chip (-e), write the given file (-w), verify the write (-v) and Reset the board (-R). On Linux or MacOS you may need to run this command with sudo ./bossac ..., or add yourself to the dialout group first.
+
+   Although I am very unsure because this might be to no override softdevice.
+   What might also work is overriding the reset pointer to the start of dfu as it looks to be in 0x080000 and just having my app starting from 0.
+ */
 MEMORY
 {
   /* NOTE K = KiBi = 1024 bytes */

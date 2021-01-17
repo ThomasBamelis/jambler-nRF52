@@ -5,6 +5,7 @@ pub mod nrf52840;
 pub struct JamBLEr<H: JamBLErHal> {
     jammer_hal : H,
     state : JamBLErState,
+    // TODO: lambda as output sink, for this and hal, accepts buffer and outputs it to whatever, returns () (jammer never bothered with failure)
 }
 
 enum JamBLErState {
