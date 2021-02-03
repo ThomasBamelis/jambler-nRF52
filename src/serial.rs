@@ -22,6 +22,9 @@ use rtt_target::rprintln;
 /// At this point in my RTIC implementation I know none of these functions will interrupt one another, so I have paid no attention to the interrupt safety of the send_string function while it is sending (maybe queue problems).
 /// 
 /// It will send and receive bytes one by one.
+/// 
+/// The serial controller will do absolutely nothing itself to interrupt or reset anything when it reads an interrupt character. 
+/// When the handler returns a string holding INTERRUPT, you should start a task for interrupting or resetting or whatever you want to do to your chip.
 pub struct SerialController {
     /// The peripheral giving me exclusive access to the uarte1.
     uarte1_peripheral : hal::pac::UARTE1,
@@ -239,6 +242,9 @@ impl SerialController {
     pub fn init_receive_string(&mut self) -> () {
         // set it so receivements are handled in the interrupt handler
         self.receiving = true;
+        // reset whatever you may have received up until now.
+        // When typing a command and pressing interrupt it would continue with the other one
+        self.received_string.clear();
     }
 
     /// What to do with the received char in the interrupt handler.
