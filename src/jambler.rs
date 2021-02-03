@@ -1,29 +1,27 @@
 pub mod nrf52840;
 pub mod state;
 
-use state::{JammerState, HandlerReturn};
-use state::StateStore;
-use state::StateConfig;
+use heapless::{consts::*, String};
 use state::IntervalTimerRequirements;
+use state::StateConfig;
+use state::StateStore;
+use state::{HandlerReturn, JammerState};
 
 use rtt_target::rprintln;
-
-
-
-
-
 
 /// The generic implementation of the vulnerability.
 /// This is supposed to hold the BLE vulnerability code, not chip specific code.
 /// It will hold a field for every possible state, as you cannot abstract it to just the trait because this means this field could change size (the state struct size) and I have no heap. This is the simplest solution.
+/// 
+/// The JamBLEr controller is responsible for receiving tasks and following the correct state transitions for that task.
+/// Whether the state itself indicates it wants to transition or because required background work is done.
+/// The controller is responsible for proper task execution as the state store is responsible for proper state execution.
 pub struct JamBLEr<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> {
-    jammer_hal : H,
-    state : JamBLErState,
-    jammer_timer : T,
+    jammer_hal: H,
+    jammer_timer: T,
     jammer_interval_timer: I,
-    state_store : StateStore,
-    current_task : JamBLErTask,
-    // TODO: lambda as output sink, for this and hal, accepts buffer and outputs it to whatever, returns () (jammer never bothered with failure)
+    state_store: StateStore,
+    current_task: JamBLErTask,
 }
 
 #[derive(Clone, Debug)]
@@ -36,7 +34,7 @@ pub enum JamBLErState {
 /// For example SniffAA(access address)
 /// While JamblerState might have 5 states for recovering a connection given an access address
 /// this will only contain a recover connection(aa) enum
-/// 
+///
 /// One task is basically subdevided into multiple jammer states
 #[derive(Clone, Debug)]
 pub enum JamBLErTask {
@@ -46,36 +44,20 @@ pub enum JamBLErTask {
 }
 
 
-/*
-macro_rules! transistion_to {
-    ($s:expr, $conf:expr, $hal:expr, $time:expr, $it:expr, $p:expr, $i:expr) => {
-        $s.config($conf); // TODO if false rprintln
-        $s.initialise(&mut $hal, $time);
-        $it = $s.needs_interval_timer();
-        $p = $s.needs_periodic_interrupt();
-        $i = $s.timer_interval();
-
-        $s.launch(&mut $hal, $time);
-    };
-}
-*/
-impl<H: JamBLErHal, T:JamBLErTimer, I:JamBLErIntervalTimer> JamBLEr<H, T, I> {
-    pub fn new(mut jammer_hal : H,mut jammer_timer : T, jammer_interval_timer : I) -> JamBLEr<H, T, I> {
+impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
+    pub fn new(
+        mut jammer_hal: H,
+        mut jammer_timer: T,
+        jammer_interval_timer: I,
+    ) -> JamBLEr<H, T, I> {
         // Start the timer
         jammer_timer.start();
-        // call idle start
-        let mut state_store = StateStore::new();
-        let config = StateConfig::new();
-        state_store.idle.config(config);
-        state_store.idle.initialise(&mut jammer_hal, 0);
-        state_store.idle.launch(&mut jammer_hal, 0);
         JamBLEr {
             jammer_hal,
-            state: JamBLErState::Idle,
             jammer_timer,
             jammer_interval_timer,
-            state_store : StateStore::new(),
-            current_task : JamBLErTask::Idle,
+            state_store: StateStore::new(),
+            current_task: JamBLErTask::Idle,
         }
     }
 
@@ -94,163 +76,136 @@ impl<H: JamBLErHal, T:JamBLErTimer, I:JamBLErIntervalTimer> JamBLEr<H, T, I> {
         match self.current_task {
             JamBLErTask::UserInterrupt => {
                 self.user_interrupt();
-            },
+            }
             JamBLErTask::Idle => {
-                self.state_transition(JamBLErState::Idle);
-            },
+                self.state_transition(JamBLErState::Idle, StateConfig::new());
+            }
             JamBLErTask::DiscoverAas => {
-                self.state_transition(JamBLErState::DiscoveringAAs);
+                // TODO specify phy in command
+                let mut config = StateConfig::new();
+                config.phy = Some(BlePHY::Uncoded1M);
+                self.state_transition(JamBLErState::DiscoveringAAs, config);
             }
         };
     }
 
-
     /// What happens on a user interrupt.
     /// For now, just idle.
     fn user_interrupt(&mut self) {
-        self.state_transition(JamBLErState::Idle);
+        self.state_transition(JamBLErState::Idle, StateConfig::new());
     }
 
-    fn set_interval_timer(&mut self, req : IntervalTimerRequirements) {
+    /// Helper function for setting the interval timer.
+    #[inline]
+    fn set_interval_timer(&mut self, req: IntervalTimerRequirements) {
+        rprintln!("Setting interval timer: {:?}", &req);
         match req {
-            IntervalTimerRequirements::NoChanges => {},
+            IntervalTimerRequirements::NoChanges => {}
             IntervalTimerRequirements::NoIntervalTimer => {
                 self.jammer_interval_timer.reset();
-            },
+            }
             IntervalTimerRequirements::Countdown(interval) => {
                 self.jammer_interval_timer.config(interval, false);
                 self.jammer_interval_timer.start();
-            },
+            }
             IntervalTimerRequirements::Periodic(interval) => {
                 self.jammer_interval_timer.config(interval, true);
                 self.jammer_interval_timer.start();
             }
         }
     }
-    
 
     /// A state transition can reset the timer twice.
     /// It is first reset to prevent any new timer interrupts.
     /// The set_interval_timer will also reset the timer if it starts or reset the timer.
     /// Better safe than sorry for now.
-    pub fn state_transition(&mut self, new_state : JamBLErState) {
-        
+    pub fn state_transition(&mut self, new_state: JamBLErState, config: StateConfig) {
+        // Disable interval timer to prevent it preempting this in the middle.
         self.jammer_interval_timer.reset();
-        rprintln!("Transitioning state: {:?} -> {:?}", &self.state, &new_state);
+
+        rprintln!(
+            "Transitioning state: {:?} -> {:?}",
+            self.state_store.get_current_state(),
+            &new_state
+        );
+
+        // Get current time
         let current_time = self.jammer_timer.get_time_micro_seconds();
 
-        // TODO match calling stop on current state
-        // stop previous state
-        match self.state {
-            JamBLErState::Idle => {
-                let state = &mut self.state_store.idle;
+        // Dispatch transition to the state store
+        let transition_result = self.state_store.state_transition(
+            new_state,
+            config,
+            &mut self.jammer_hal,
+            current_time,
+        );
 
-                state.stop(&mut self.jammer_hal, current_time);
-            },
-            JamBLErState::DiscoveringAAs => {
-                let state = &mut self.state_store.discover_aas;
-
-                state.stop(&mut self.jammer_hal, current_time);
-            },
-        }
-
-        let timing_requirements;
-        
-        
-        // TODO at some point find a way around these ugly matches by making an object trait out of a JammerState. For now, first do ble stuff before code cleanup. See if it works first before all. YAGNI
-        //let t : JammerState = d;
-        
-
-        // configure the state, initialise it, get its timing requirements
-        // and launch it.
-        match new_state {
-            JamBLErState::Idle => {
-                let state = &mut self.state_store.idle;
-                let conf = StateConfig::new();
-
-                state.config(conf);
-                timing_requirements = state.initialise(&mut self.jammer_hal, current_time);
-
-                state.launch(&mut self.jammer_hal, current_time);
-            },
-            JamBLErState::DiscoveringAAs => {
-                let state = &mut self.state_store.discover_aas;
-                let mut conf = StateConfig::new();
-                conf.phy = Some(BlePHY::Uncoded1M);
-                conf.previous_state = Some(self.state.clone());
-
-
-                // this should be equivalent to the first case
-                //transistion_to!(state, conf, self.jammer_hal, current_time, interval_timer, periodic, interval);
-
-
-                state.config(conf);
-                timing_requirements = state.initialise(&mut self.jammer_hal, current_time);
-    
-                state.launch(&mut self.jammer_hal, current_time);
+        match transition_result {
+            Ok(timing_requirements) => {
+                self.set_interval_timer(timing_requirements);
             }
-        };
-        
-        self.set_interval_timer(timing_requirements);
-
-        self.state = new_state;
+            Err(state_error) => {
+                rprintln!("ERROR: invalid state transition: {:?}", state_error);
+                panic!()
+            }
+        }
     }
 
-
     /// Radio interrupt received, dispatch it to the state
-    pub fn handle_radio_interrupt(&mut self) -> () {
+    #[inline]
+    pub fn handle_radio_interrupt(&mut self) -> JamBLErReturn {
+        // Get current time
         let current_time = self.jammer_timer.get_time_micro_seconds();
-        
-        let (ret, timing_requirements) = match self.state {
-            JamBLErState::Idle => {
-                let state = &mut self.state_store.idle;
-                state.handle_interrupt(&mut self.jammer_hal, current_time)},
-            JamBLErState::DiscoveringAAs => {
-                let state = &mut self.state_store.discover_aas;
-                state.handle_interrupt(&mut self.jammer_hal, current_time)
-            },
-        };
-
-
+        // Dispatch to state
+        let (ret, timing_requirements) = self
+            .state_store
+            .handle_radio_interrupt(&mut self.jammer_hal, current_time);
         // Obey timing requirements
         self.set_interval_timer(timing_requirements);
-
-        //TODO handle return
+        
+        self.process_state_return_value(ret)
     }
 
     /// Received interval timer interrupt, dispatch it to the state.
-    pub fn handle_interval_timer_interrupt(&mut self) {
-
-
-        //TODO remove
+    #[inline]
+    pub fn handle_interval_timer_interrupt(&mut self) -> JamBLErReturn {
+        // Necessary. At least for nrf because event needs to be reset.
         self.jammer_interval_timer.interrupt_handler();
-
+        // Get current time;
         let current_time = self.jammer_timer.get_time_micro_seconds();
         // Dispatch it to the state
-        //TODO macro
-        let (ret, timing_requirements) = match self.state {
-            JamBLErState::Idle => {
-                let state = &mut self.state_store.idle;
-                state.handle_interval_timer_interrupt(&mut self.jammer_hal, current_time)},
-            JamBLErState::DiscoveringAAs => {
-                let state = &mut self.state_store.discover_aas;
-                state.handle_interval_timer_interrupt(&mut self.jammer_hal, current_time)
-            },
-        };
-
+        let (ret, timing_requirements) = self
+            .state_store
+            .handle_interval_timer_interrupt(&mut self.jammer_hal, current_time);
         // Obey timing requirements
         self.set_interval_timer(timing_requirements);
-
-        //TODO handle return
         
+        self.process_state_return_value(ret)
     }
 
-
     /// Handler for the long term interrupt timer for when it wraps
+    #[inline]
     pub fn handle_timer_interrupt(&mut self) {
         self.jammer_timer.interrupt_handler();
     }
+
+    /// Processes the return from a state, regardless from which interrupt.
+    /// The state is telling the controller something here and should act accordingly.
+    #[inline]
+    fn process_state_return_value(&mut self, return_type : HandlerReturn) -> JamBLErReturn {
+        //TODO
+        // TODO will most likely need a return t
+        JamBLErReturn::NoReturn
+    }
 }
+
+
+#[derive(Debug, Clone)]
+pub enum JamBLErReturn {
+    OutputString(String<U256>),
+    NoReturn,
+}
+
 
 #[derive(Debug, Clone)]
 pub enum JamBLErHalError {
@@ -266,22 +221,22 @@ pub enum BlePHY {
 }
 
 /// The trait that a specific chip has to implement to be used by the jammer.
+/// ANY FUNCTION HERE SHOULD BE INLINED IN IMPLEMENTATION!
 pub trait JamBLErHal {
-    fn set_access_address(&mut self, aa : u32) -> Result<(), JamBLErHalError>;
+    fn set_access_address(&mut self, aa: u32) -> Result<(), JamBLErHalError>;
 }
 
 pub trait JamBLErTimer {
-
     /// Starts the timer
     fn start(&mut self);
 
     /// Gets the duration since the start of the count in micro seconds.
     /// Micro should be accurate enough for any BLE event.
+    /// SHOULD ALWAYS BE INLINED
     fn get_time_micro_seconds(&mut self) -> u64;
 
     /// Resets the timer.
     fn reset(&mut self);
-
 
     /// Gets the drift of the timer in nanoseconds, rounded up.
     fn get_ppm(&mut self) -> u32;
@@ -294,7 +249,6 @@ pub trait JamBLErTimer {
     /// Gets the maximum amount of time before overflow in seconds, rounded down.
     fn get_max_time_seconds(&mut self) -> Option<u64>;
 
-
     /// Gets the maximum amount of time before overflow in milliseconds, rounded down.
     fn get_max_time_ms(&mut self) -> Option<u64>;
 
@@ -303,19 +257,19 @@ pub trait JamBLErTimer {
 }
 
 /// A timer which should generate an interrupt on its given interval.
+/// ANY FUNCTION HERE SHOULD BE INLINED IN IMPLEMENTATION!
 pub trait JamBLErIntervalTimer {
-
     /// Sets the interval in microseconds and if the timer should function as a countdown or as a periodic timer.
     /// Returns false if the interval is too long for the timer.
-    fn config(&mut self, interval : u32, periodic : bool) -> bool;
+    fn config(&mut self, interval: u32, periodic: bool) -> bool;
 
     /// Starts the timer
+    /// 
     fn start(&mut self);
-
 
     /// Resets the timer.
     fn reset(&mut self);
 
-    //TODO delete
+    /// Anything a timer needs to do to keep itself going on an interrupt.
     fn interrupt_handler(&mut self);
 }
