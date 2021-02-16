@@ -56,14 +56,12 @@ const APP: () = {
 
         // setup jammer
         let radio: hal::pac::RADIO = ctx.device.RADIO;
-        let nrf_jambler = Nrf52840JamBLEr {
-            radio_peripheral: radio,
-        };
-
+        let nrf_jambler = Nrf52840JamBLEr::new(radio);
         let timer_per: hal::pac::TIMER2 = ctx.device.TIMER2;
         let nrf_timer = Nrf52840Timer::new(timer_per);
         let interval_timer_per: hal::pac::TIMER1 = ctx.device.TIMER1;
         let interval_nrf_timer = Nrf52840IntervalTimer::new(interval_timer_per);
+        
         let jambler = JamBLEr::new(nrf_jambler, nrf_timer, interval_nrf_timer);
         //rprintln!("Initialised jammer.");
 
@@ -118,7 +116,7 @@ const APP: () = {
     /// A handler for radio events
     #[task(binds = RADIO ,priority = 7, resources = [jambler, dummy])]
     fn handle_radio(ctx: handle_radio::Context) {
-        rprintln!("Received interrupt from the radio. Should check its events.");
+        //rprintln!("Received interrupt from the radio. Should check its events.");
         let jambler: &mut JamBLEr<Nrf52840JamBLEr, Nrf52840Timer, Nrf52840IntervalTimer> =
             ctx.resources.jambler;
         let return_instruction = jambler.handle_radio_interrupt();
@@ -128,7 +126,7 @@ const APP: () = {
     /// Handles interrupts of the INTERVAL timer used by the jammer
     #[task(binds = TIMER1 ,priority = 6, resources = [jambler])]
     fn handle_timer1(mut ctx: handle_timer1::Context) {
-        rprintln!("Received interrupt from the interval timer.");
+        //rprintln!("Received interrupt from the interval timer.");
         // Get lock on the jammer to be able to call its timer interrupt.
         ctx.resources.jambler.lock(|jambler| {
             let return_instruction = jambler.handle_interval_timer_interrupt();
@@ -169,7 +167,7 @@ const APP: () = {
     #[task(binds = TIMER2 ,priority = 4, resources = [jambler])]
     fn handle_timer2(mut ctx: handle_timer2::Context) {
         // Get lock on the jammer to be able to call its timer interrupt.
-        rprintln!("Received interrupt from the long term timer.");
+        //rprintln!("Received interrupt from the long term timer.");
         ctx.resources.jambler.lock(|jambler| {
             jambler.handle_timer_interrupt();
         });

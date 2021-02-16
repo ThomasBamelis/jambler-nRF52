@@ -1,11 +1,17 @@
-pub mod nrf52840;
-pub mod state;
+mod state;
+mod util;
+mod hardware_traits;
+
+// Re-export hardware implementations for user
+use heapless::Vec;
+pub use hardware_traits::nrf52840;
 
 use heapless::{consts::*, String};
 use state::IntervalTimerRequirements;
 use state::StateConfig;
 use state::StateStore;
-use state::{HandlerReturn, JammerState};
+use state::{StateParameters, StateReturn, JammerState};
+use hardware_traits::*;
 
 use rtt_target::rprintln;
 
@@ -15,7 +21,7 @@ use rtt_target::rprintln;
 /// 
 /// The JamBLEr controller is responsible for receiving tasks and following the correct state transitions for that task.
 /// Whether the state itself indicates it wants to transition or because required background work is done.
-/// The controller is responsible for proper task execution as the state store is responsible for proper state execution.
+/// The controller is responsible for proper task execution in the same way that the state store is responsible for proper state execution.
 pub struct JamBLEr<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> {
     jammer_hal: H,
     jammer_timer: T,
@@ -24,6 +30,7 @@ pub struct JamBLEr<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> {
     current_task: JamBLErTask,
 }
 
+/// TODO move to state.rs
 #[derive(Clone, Debug)]
 pub enum JamBLErState {
     Idle,
@@ -36,6 +43,8 @@ pub enum JamBLErState {
 /// this will only contain a recover connection(aa) enum
 ///
 /// One task is basically subdevided into multiple jammer states
+/// 
+/// See the diagram about task state diagrams to better understand this.
 #[derive(Clone, Debug)]
 pub enum JamBLErTask {
     UserInterrupt,
@@ -81,9 +90,17 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                 self.state_transition(JamBLErState::Idle, StateConfig::new());
             }
             JamBLErTask::DiscoverAas => {
-                // TODO specify phy in command
+                // TODO specify all in command or I2C communication
                 let mut config = StateConfig::new();
+                // for now, listen on legacy phy, all data channels and switch every 3 seconds
                 config.phy = Some(BlePHY::Uncoded1M);
+                config.interval = Some(3 * 1_000_000);
+                let mut cc : Vec<u8, U64> = Vec::new();
+                for i in 0..=36 {
+                    cc.push(i).unwrap();
+                }
+                config.channel_chain = Some(cc);
+                
                 self.state_transition(JamBLErState::DiscoveringAAs, config);
             }
         };
@@ -97,19 +114,19 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
 
     /// Helper function for setting the interval timer.
     #[inline]
-    fn set_interval_timer(&mut self, req: IntervalTimerRequirements) {
-        rprintln!("Setting interval timer: {:?}", &req);
+    fn set_interval_timer(&mut self, req: &IntervalTimerRequirements) {
+        //rprintln!("Setting interval timer: {:?}", &req);
         match req {
             IntervalTimerRequirements::NoChanges => {}
             IntervalTimerRequirements::NoIntervalTimer => {
                 self.jammer_interval_timer.reset();
             }
             IntervalTimerRequirements::Countdown(interval) => {
-                self.jammer_interval_timer.config(interval, false);
+                self.jammer_interval_timer.config(*interval, false);
                 self.jammer_interval_timer.start();
             }
             IntervalTimerRequirements::Periodic(interval) => {
-                self.jammer_interval_timer.config(interval, true);
+                self.jammer_interval_timer.config(*interval, true);
                 self.jammer_interval_timer.start();
             }
         }
@@ -132,17 +149,28 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
         // Get current time
         let current_time = self.jammer_timer.get_time_micro_seconds();
 
+        // construct the parameters
+        let parameters = &mut StateParameters{
+            radio: &mut self.jammer_hal, 
+            current_time, 
+            config: Some(config)
+        };
+
         // Dispatch transition to the state store
         let transition_result = self.state_store.state_transition(
             new_state,
-            config,
-            &mut self.jammer_hal,
-            current_time,
+            parameters
         );
 
+        // Check for errors and any timing requirements
         match transition_result {
-            Ok(timing_requirements) => {
-                self.set_interval_timer(timing_requirements);
+            Ok(state_return) => {
+                if let Some(ret) = &state_return {
+                    if let Some(timing_requirements) = &ret.timing_requirements {
+                        self.set_interval_timer(timing_requirements);
+                    }
+                    // TODO any output or something
+                }
             }
             Err(state_error) => {
                 rprintln!("ERROR: invalid state transition: {:?}", state_error);
@@ -153,34 +181,68 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
 
     /// Radio interrupt received, dispatch it to the state
     #[inline]
-    pub fn handle_radio_interrupt(&mut self) -> JamBLErReturn {
+    pub fn handle_radio_interrupt(&mut self) -> Option<JamBLErReturn> {
         // Get current time
         let current_time = self.jammer_timer.get_time_micro_seconds();
+        // construct the parameters
+        let parameters = &mut StateParameters{
+            radio: &mut self.jammer_hal, 
+            current_time, 
+            config: None
+        };
         // Dispatch to state
-        let (ret, timing_requirements) = self
+        let state_return = self
             .state_store
-            .handle_radio_interrupt(&mut self.jammer_hal, current_time);
-        // Obey timing requirements
-        self.set_interval_timer(timing_requirements);
-        
-        self.process_state_return_value(ret)
+            .handle_radio_interrupt(parameters);
+
+
+        // process return
+        if let Some(ret) = state_return {
+            // Obey timing requirements ASAP
+            if let Some(timing_requirements) = &ret.timing_requirements {
+                self.set_interval_timer(timing_requirements);
+            }
+
+            self.process_state_return_value(ret)
+        }
+        else {
+            None
+        }
     }
 
     /// Received interval timer interrupt, dispatch it to the state.
     #[inline]
-    pub fn handle_interval_timer_interrupt(&mut self) -> JamBLErReturn {
+    pub fn handle_interval_timer_interrupt(&mut self) -> Option<JamBLErReturn> {
         // Necessary. At least for nrf because event needs to be reset.
         self.jammer_interval_timer.interrupt_handler();
         // Get current time;
         let current_time = self.jammer_timer.get_time_micro_seconds();
+
+
+        // construct the parameters
+        let parameters = &mut StateParameters{
+            radio: &mut self.jammer_hal, 
+            current_time, 
+            config: None
+        };
+
         // Dispatch it to the state
-        let (ret, timing_requirements) = self
+        let state_return = self
             .state_store
-            .handle_interval_timer_interrupt(&mut self.jammer_hal, current_time);
-        // Obey timing requirements
-        self.set_interval_timer(timing_requirements);
-        
-        self.process_state_return_value(ret)
+            .handle_interval_timer_interrupt(parameters);
+
+        // process return
+        if let Some(ret) = state_return {
+            // Obey timing requirements ASAP
+            if let Some(timing_requirements) = &ret.timing_requirements {
+                self.set_interval_timer(timing_requirements);
+            }
+
+            self.process_state_return_value(ret)
+        }
+        else {
+            None
+        }
     }
 
     /// Handler for the long term interrupt timer for when it wraps
@@ -192,10 +254,10 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
     /// Processes the return from a state, regardless from which interrupt.
     /// The state is telling the controller something here and should act accordingly.
     #[inline]
-    fn process_state_return_value(&mut self, return_type : HandlerReturn) -> JamBLErReturn {
+    fn process_state_return_value(&mut self, return_type : StateReturn) -> Option<JamBLErReturn> {
         //TODO
         // TODO will most likely need a return t
-        JamBLErReturn::NoReturn
+        Some(JamBLErReturn::NoReturn)
     }
 }
 
@@ -207,69 +269,10 @@ pub enum JamBLErReturn {
 }
 
 
-#[derive(Debug, Clone)]
-pub enum JamBLErHalError {
-    SetAccessAddressError,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum BlePHY {
     Uncoded1M,
     Uncoded2M,
     CodedS2,
     CodedS8,
-}
-
-/// The trait that a specific chip has to implement to be used by the jammer.
-/// ANY FUNCTION HERE SHOULD BE INLINED IN IMPLEMENTATION!
-pub trait JamBLErHal {
-    fn set_access_address(&mut self, aa: u32) -> Result<(), JamBLErHalError>;
-}
-
-pub trait JamBLErTimer {
-    /// Starts the timer
-    fn start(&mut self);
-
-    /// Gets the duration since the start of the count in micro seconds.
-    /// Micro should be accurate enough for any BLE event.
-    /// SHOULD ALWAYS BE INLINED
-    fn get_time_micro_seconds(&mut self) -> u64;
-
-    /// Resets the timer.
-    fn reset(&mut self);
-
-    /// Gets the drift of the timer in nanoseconds, rounded up.
-    fn get_ppm(&mut self) -> u32;
-
-    fn get_drift_percentage(&mut self) -> f64 {
-        // ppm stands for parts per million, so divide by 1 million.
-        self.get_ppm() as f64 / 1000000 as f64
-    }
-
-    /// Gets the maximum amount of time before overflow in seconds, rounded down.
-    fn get_max_time_seconds(&mut self) -> Option<u64>;
-
-    /// Gets the maximum amount of time before overflow in milliseconds, rounded down.
-    fn get_max_time_ms(&mut self) -> Option<u64>;
-
-    /// Will be called when an interrupt for the timer occurs.
-    fn interrupt_handler(&mut self);
-}
-
-/// A timer which should generate an interrupt on its given interval.
-/// ANY FUNCTION HERE SHOULD BE INLINED IN IMPLEMENTATION!
-pub trait JamBLErIntervalTimer {
-    /// Sets the interval in microseconds and if the timer should function as a countdown or as a periodic timer.
-    /// Returns false if the interval is too long for the timer.
-    fn config(&mut self, interval: u32, periodic: bool) -> bool;
-
-    /// Starts the timer
-    /// 
-    fn start(&mut self);
-
-    /// Resets the timer.
-    fn reset(&mut self);
-
-    /// Anything a timer needs to do to keep itself going on an interrupt.
-    fn interrupt_handler(&mut self);
 }

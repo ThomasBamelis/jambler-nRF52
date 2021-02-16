@@ -1,10 +1,25 @@
 /// Jammer states trait
 /// This will handle the ugly truth of avoiding dynamic dispatch.
-use heapless::{consts::*, String};
+use heapless::{consts::*, String, Vec};
 
 use super::{BlePHY, JamBLErHal, JamBLErState};
 
+
+use rtt_target::rprintln;
+
+
+/// Errors a state can give.
+#[derive(Clone, Debug)]
+pub enum StateError {
+    InvalidStateTransition(&'static str),
+    InvalidConfig(&'static str),
+    MissingConfig(&'static str),
+    JamBLErHalError(&'static str),
+}
+
+
 /// Possible parameters a state might need to configure itself.
+#[derive(Debug)]
 pub struct StateConfig {
     pub phy: Option<BlePHY>,
     pub access_address: Option<u32>,
@@ -17,12 +32,19 @@ pub struct StateConfig {
     pub initial_counter_value: Option<u32>,
     pub counter: Option<u32>,
     pub previous_state: Option<JamBLErState>,
+    /// When it is needed to iterate through a bunch of channels.
+    /// Can have 64 unsigned 8-bit integers, although it only needs 37.
+    /// For a Queue, they say you get better performance if the size is a 
+    /// power of 2. This is not said for vectors, but for now I will still to it here.
+    pub channel_chain: Option<Vec<u8,U64>>,
+    /// The interval at which a state has to do something (like switching channel).
+    pub interval : Option<u32>,
 }
 
 impl StateConfig {
     /// Default constructor for quickly initialising a config
     /// without any parameters.
-    pub fn new() -> StateConfig {
+    pub fn new<'a>() -> StateConfig {
         StateConfig {
             phy: None,
             access_address: None,
@@ -35,6 +57,106 @@ impl StateConfig {
             initial_counter_value: None,
             counter: None,
             previous_state: None,
+            channel_chain: None,
+            interval: None
+        }
+    }
+}
+
+/// Enum for returning feedback or a task from the state functions.
+/// An enum in memory is always the size of its biggest variant,
+/// that is why we can return it. Returning an impl which some structs implement
+/// would not work because they can have different sizes at runtime which is not allowed.
+/// Remember, no dynamic allocation.
+//pub enum HandlerReturn {
+//    OutputString(String<U256>),
+//    NoReturn,
+//}
+
+/// Indicates to the controller which timing requirements you want after an interaction.
+#[derive(Clone,Debug)]
+pub enum IntervalTimerRequirements {
+    NoIntervalTimer,
+    NoChanges,
+    Periodic(u32),
+    Countdown(u32),
+}
+
+/// A struct holding information about a discovered access address.
+#[derive(Clone,Debug)]
+pub struct DiscoveredAccessAddress {
+    /// The access address.
+    address : u32,
+    /// The phy on which the AA was discovered.
+    phy : BlePHY,
+    /// The channel on which the AA was discovered.
+    channel : u8,
+    /// The time at which the AA was discovered.
+    time : u64,
+    /// RSSI of the packet that discovered the AA
+    rssi : i8,
+    /// Indicates whether it was captured from the master or the slave if known,
+    sent_by_master: Option<bool>
+}
+
+/// For returning things the master should knkow
+#[derive(Clone,Debug)]
+pub enum StateMessage {
+    /// An access address discovered in the discover AA state.
+    /// Parameters are in the following order:
+    /// 
+    AccessAddress(DiscoveredAccessAddress),
+    // Later on you should have a harvested_packet struct and an enum holding it here
+}
+
+/// Struct for letting a state return something
+/// TODO pass as &mut parameter to avoid big stack allocation?
+pub struct StateReturn {
+    pub timing_requirements : Option<IntervalTimerRequirements>,
+    pub output_string : Option<String<U256>>,
+    pub state_transition : Option<(JamBLErState, Option<StateConfig>)>,
+    pub state_message : Option<StateMessage>
+}
+
+impl StateReturn {
+    /// A convenience constructor.
+    /// Everything None, change the fields manually to what is necessary.
+    pub fn new() -> StateReturn {
+        StateReturn {
+            timing_requirements : None,
+            output_string : None,
+            state_transition : None,
+            state_message : None,
+        }
+    }
+}
+
+/// Struct for passing parameters to a state.
+/// Takes a mutable reference to a JamBLErHal which
+/// must have a lifetime as long as the parameter lives
+/// 
+/// In all function where this is used it should be a mutable reference
+/// that is passed to reduce stack size.
+pub struct StateParameters<'a, H: JamBLErHal> {
+    pub config : Option<StateConfig>, 
+    pub radio : &'a mut H, 
+    pub current_time : u64,
+}
+
+impl<'a, H: JamBLErHal> StateParameters<'a, H> {
+    pub fn new(radio : &'a mut H, instant_in_microseconds : u64, config: StateConfig) -> StateParameters<'a, H> {
+        StateParameters {
+            config : Some(config),
+            radio,
+            current_time : instant_in_microseconds,
+        }
+    }
+
+    pub fn new_no_config(radio : &'a mut H, instant_in_microseconds : u64) -> StateParameters<'a, H> {
+        StateParameters {
+            config: None,
+            radio,
+            current_time : instant_in_microseconds
         }
     }
 }
@@ -55,36 +177,40 @@ impl StateConfig {
 pub trait JammerState {
     fn new() -> Self;
 
-    /// Returns false if a parameter was missing, will do nothing in that case.
-    fn config(&mut self, parameters: StateConfig) -> Result<(), StateError>;
+    /// Returns an error if a required config parameter was missing.
+    fn config(&mut self, parameters: &mut StateParameters<impl JamBLErHal>) -> Result<(), StateError>;
 
     /// Functions as a reset + start!
     /// Every state should have a config method which you should call before this one.
+    /// Should always return timing.
     fn initialise(
         &mut self,
-        radio: &mut impl JamBLErHal,
-        instant_in_microseconds: u64,
-    ) -> IntervalTimerRequirements;
+        parameters: &mut StateParameters<impl JamBLErHal>
+    ) -> Option<StateReturn>;
 
-    fn launch(&mut self, radio: &mut impl JamBLErHal, instant_in_microseconds: u64);
+    fn launch(&mut self, parameters: &mut StateParameters<impl JamBLErHal>);
 
-    fn stop(&mut self, radio: &mut impl JamBLErHal, instant_in_microseconds: u64);
+    /// Used for updating the state.
+    /// For example, updating the connInterval while sniffing for packets,
+    /// without completely restarting, thus not wasting the time you were listening on the current channel..
+    /// Returns an error if you provided an illegal parameter.
+    fn update_state(
+        &mut self, parameters: &mut StateParameters<impl JamBLErHal>
+    ) -> Result<Option<StateReturn>, StateError>;
+
+    fn stop(&mut self, parameters: &mut StateParameters<impl JamBLErHal>);
 
     /// Handle a radio interrupt.
     /// ALWAYS INLINE IN IMPLEMENTATION!
     fn handle_radio_interrupt(
-        &mut self,
-        radio: &mut impl JamBLErHal,
-        instant_in_microseconds: u64,
-    ) -> (HandlerReturn, IntervalTimerRequirements);
+        &mut self, parameters: &mut StateParameters<impl JamBLErHal>
+    ) -> Option<StateReturn>;
 
     /// Handle an interval timer interrupt.
     /// ALWAYS INLINE IN IMPLEMENTATION!
     fn handle_interval_timer_interrupt(
-        &mut self,
-        radio: &mut impl JamBLErHal,
-        instant_in_microseconds: u64,
-    ) -> (HandlerReturn, IntervalTimerRequirements);
+        &mut self, parameters: &mut StateParameters<impl JamBLErHal> 
+    ) -> Option<StateReturn>;
 
     /// Is it valid to go from the self state to the new state.
     /// self -> new_state valid?
@@ -93,25 +219,6 @@ pub trait JammerState {
     /// Is it valid to go to the self state from the old_state
     /// new_state -> self valid?
     fn is_valid_transition_from(&mut self, old_state: &JamBLErState) -> Result<(), StateError>;
-}
-
-/// Enum for returning feedback or a task from the state functions.
-/// An enum in memory is always the size of its biggest variant,
-/// that is why we can return it. Returning an impl which some structs implement
-/// would not work because they can have different sizes at runtime which is not allowed.
-/// Remember, no dynamic allocation.
-pub enum HandlerReturn {
-    OutputString(String<U256>),
-    NoReturn,
-}
-
-/// Indicates to the controller which timing requirements you want after an interaction.
-#[derive(Clone,Debug)]
-pub enum IntervalTimerRequirements {
-    NoIntervalTimer,
-    NoChanges,
-    Periodic(u32),
-    Countdown(u32),
 }
 
 pub mod discover_aas;
@@ -158,12 +265,14 @@ impl StateStore {
     pub fn state_transition(
         &mut self,
         new_state: JamBLErState,
-        config: StateConfig,
-        radio: &mut impl JamBLErHal,
-        instant_in_microseconds: u64,
-    ) -> Result<IntervalTimerRequirements, StateError> {
+        parameters: &mut StateParameters<impl JamBLErHal>
+    ) -> Result<Option<StateReturn>, StateError> {
         // We will stop the previous state even though it can crash later in new state
         // However, leaving the system in an invalid state is not bad because it is a crash either way, an invalid transition
+
+        // Reset the radio between states
+        // TODO is this oke? Does this eliminate the need for stop?
+        parameters.radio.reset();
 
         // Check if old -> new is valid for old and stop if if ok
         // The ? will make the function return early.
@@ -173,17 +282,18 @@ impl StateStore {
 
                 // This is identical for every case
                 state.is_valid_transition_to(&new_state)?;
-                state.stop(radio, instant_in_microseconds);
+                // THESE ARE THE PARAMETERS FOR THE NEW STATE
+                state.stop(parameters);
             }
             JamBLErState::DiscoveringAAs => {
                 let state = &mut self.discover_aas;
 
                 state.is_valid_transition_to(&new_state)?;
-                state.stop(radio, instant_in_microseconds);
+                state.stop(parameters);
             }
         };
 
-        let timing_requirements;
+        let state_return;
 
         // configure the state, initialise it, get its timing requirements
         // and launch it.
@@ -193,43 +303,61 @@ impl StateStore {
 
                 // This is identical for every case
                 state.is_valid_transition_from(&self.current_state)?;
-                state.config(config)?;
-                timing_requirements = state.initialise(radio, instant_in_microseconds);
-                state.launch(radio, instant_in_microseconds);
+                state.config(parameters)?;
+                state_return = state.initialise(parameters);
+                state.launch(parameters);
             }
             JamBLErState::DiscoveringAAs => {
                 let state = &mut self.discover_aas;
 
                 state.is_valid_transition_from(&self.current_state)?;
-                state.config(config)?;
-                timing_requirements = state.initialise(radio, instant_in_microseconds);
-                state.launch(radio, instant_in_microseconds);
+                state.config(parameters)?;
+                state_return = state.initialise(parameters);
+                state.launch(parameters);
             }
         };
 
         self.current_state = new_state;
 
-        Ok(timing_requirements)
+        Ok(state_return)
+    }
+
+    /// Updates the state.
+    /// Returns an error if the config was invalid.
+    #[inline]
+    pub fn update_state(
+        &mut self, parameters: &mut StateParameters<impl JamBLErHal>
+    ) -> Result<Option<StateReturn>, StateError> {
+        match &mut self.current_state {
+            JamBLErState::Idle => {
+                let state = &mut self.idle;
+                
+                state.update_state(parameters)
+            },
+            JamBLErState::DiscoveringAAs => {
+                let state = &mut self.discover_aas;
+                
+                state.update_state(parameters)
+            }
+        }
     }
 
     /// Will dispatch the radio interrupt to the right jammerstate for the current jamblerstate.
     #[inline]
     pub fn handle_radio_interrupt(
-        &mut self,
-        radio: &mut impl JamBLErHal,
-        instant_in_microseconds: u64,
-    ) -> (HandlerReturn, IntervalTimerRequirements) {
+        &mut self, parameters: &mut StateParameters<impl JamBLErHal>
+    ) -> Option<StateReturn> {
         match self.current_state {
             JamBLErState::Idle => {
                 let state = &mut self.idle;
 
                 // Following is same for every case
-                state.handle_radio_interrupt(radio, instant_in_microseconds)
+                state.handle_radio_interrupt(parameters)
             }
             JamBLErState::DiscoveringAAs => {
                 let state = &mut self.discover_aas;
 
-                state.handle_radio_interrupt(radio, instant_in_microseconds)
+                state.handle_radio_interrupt(parameters)
             }
         }
     }
@@ -237,28 +365,21 @@ impl StateStore {
     /// Will dispatch the interval timer interrupt to the right jammerstate for the current jamblerstate.
     #[inline]
     pub fn handle_interval_timer_interrupt(
-        &mut self,
-        radio: &mut impl JamBLErHal,
-        instant_in_microseconds: u64,
-    ) -> (HandlerReturn, IntervalTimerRequirements) {
+        &mut self, parameters: &mut StateParameters<impl JamBLErHal>
+    ) -> Option<StateReturn> {
         match self.current_state {
             JamBLErState::Idle => {
                 let state = &mut self.idle;
 
                 // Following is same for every case
-                state.handle_interval_timer_interrupt(radio, instant_in_microseconds)
+                state.handle_interval_timer_interrupt(parameters)
             }
             JamBLErState::DiscoveringAAs => {
                 let state = &mut self.discover_aas;
 
-                state.handle_interval_timer_interrupt(radio, instant_in_microseconds)
+                state.handle_interval_timer_interrupt(parameters)
             }
         }
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum StateError {
-    InvalidStateTransition(&'static str),
-    InvalidConfig(&'static str),
-}
