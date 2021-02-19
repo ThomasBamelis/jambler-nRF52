@@ -21,9 +21,9 @@ impl JammerState for Idle {
     fn initialise(
         &mut self,
         parameters: &mut StateParameters<impl JamBLErHal>
-    ) -> Option<StateReturn> {
+    ) -> Result<Option<StateReturn>, StateError> {
         // Should not require an interval timer, None should not change anything (timer gets reset anyway on a state transition).
-        None
+        Ok(None)
     }
 
     fn launch(&mut self, parameters: &mut StateParameters<impl JamBLErHal>) {
@@ -47,7 +47,7 @@ impl JammerState for Idle {
     fn handle_radio_interrupt(
         &mut self,
         parameters: &mut StateParameters<impl JamBLErHal>
-    ) -> Option<StateReturn> {
+    ) -> Result<Option<StateReturn>, StateError> {
         // Should never be reached
         panic!()
     }
@@ -57,7 +57,7 @@ impl JammerState for Idle {
     fn handle_interval_timer_interrupt(
         &mut self,
         parameters: &mut StateParameters<impl JamBLErHal>
-    ) -> Option<StateReturn> {
+    ) -> Result<Option<StateReturn>, StateError> {
         // Should never be reached
         panic!()
     }
@@ -74,6 +74,7 @@ impl JammerState for Idle {
         match new_state {
             Idle => Ok(()),
             DiscoveringAAs => Ok(()),
+            JamBLErState::HarvestingPackets => Ok(()),
             _ => Err(StateError::InvalidStateTransition(
                 "Idle to a non-start state.",
             )),

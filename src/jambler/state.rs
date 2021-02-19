@@ -1,8 +1,16 @@
+
+pub mod discover_aas;
+pub mod idle;
+pub mod harvest_packets;
+
+
 /// Jammer states trait
 /// This will handle the ugly truth of avoiding dynamic dispatch.
+use crate::jambler::state::harvest_packets::HarvestedPacket;
 use heapless::{consts::*, String, Vec};
 
 use super::{BlePHY, JamBLErHal, JamBLErState};
+use super::JamBLErHalError;
 
 
 use rtt_target::rprintln;
@@ -14,7 +22,13 @@ pub enum StateError {
     InvalidStateTransition(&'static str),
     InvalidConfig(&'static str),
     MissingConfig(&'static str),
-    JamBLErHalError(&'static str),
+    JamBLErHalError(&'static str, JamBLErHalError),
+}
+
+impl core::convert::From<super::hardware_traits::JamBLErHalError> for StateError {
+    fn from(jambler_hal_error: super::hardware_traits::JamBLErHalError) -> StateError {
+        return StateError::JamBLErHalError("HAL error was given: ", jambler_hal_error);
+    }
 }
 
 
@@ -39,6 +53,12 @@ pub struct StateConfig {
     pub channel_chain: Option<Vec<u8,U64>>,
     /// The interval at which a state has to do something (like switching channel).
     pub interval : Option<u32>,
+    /// Number of intervals to listen for (harvesting packets)
+    pub number_of_intervals : Option<u32>,
+    /// The clock drift in ppm of the interval timer
+    pub interval_timer_ppm : Option<u32>,
+    /// The clock drift in ppm of the long term timer, which provides the current_time timestamp.
+    pub long_term_timer_ppm : Option<u32>,
 }
 
 impl StateConfig {
@@ -58,7 +78,10 @@ impl StateConfig {
             counter: None,
             previous_state: None,
             channel_chain: None,
-            interval: None
+            interval: None,
+            number_of_intervals: None,
+            interval_timer_ppm : None,
+            long_term_timer_ppm : None,
         }
     }
 }
@@ -106,7 +129,10 @@ pub enum StateMessage {
     /// Parameters are in the following order:
     /// 
     AccessAddress(DiscoveredAccessAddress),
-    // Later on you should have a harvested_packet struct and an enum holding it here
+    /// An enum holding a harvested packet and a boolean indicating whether or not the sniffer has completed listening on all the channels of his channel chain.
+    HarvestedPacket(HarvestedPacket, bool),
+    /// Holds the channel index of an unused channel (listened for max_conn_interval * number_intervals and received nothing) and a boolean indicating whether or not the sniffer has completed listening on all the channels of his channel chain.
+    UnusedChannel(u8, bool)
 }
 
 /// Struct for letting a state return something
@@ -174,6 +200,35 @@ impl<'a, H: JamBLErHal> StateParameters<'a, H> {
 /// 2) The controller should start those timing requirements and then launch.
 /// 3) The state will return a HandlerReturn return Value and timing requirements on every handle_interrupt (radio  interrupt) or handle_interval_timer_interrrupt
 /// 4) Before this state is left, the stop function will be called, giving the state the opportunity to do cleanup.
+/// 
+/// # Example
+/// ```
+/// // dummy get created to allocate space for it
+/// let state = JammerState::new();
+/// 
+///  // A state transitions to that state
+/// state.is_valid_transition_from(&previous_state)?;
+/// state.config(parameters)?;
+/// state_return = state.initialise(parameters)?;
+/// state.launch(parameters);
+/// 
+/// // interrupts are passed on to the state
+/// state.handle_radio_interrupt(parameters)
+/// state.handle_interval_timer_interrupt(parameters)
+/// 
+/// // State get update (!= restarted)
+/// state.update_state(parameters)
+/// 
+/// 
+/// // More interrupts are passed on to the state
+/// state.handle_radio_interrupt(parameters)
+/// state.handle_interval_timer_interrupt(parameters)
+/// 
+/// // Transition from this state to another state
+/// state.is_valid_transition_to(&new_state)?;
+/// state.stop(parameters);
+/// 
+/// ```
 pub trait JammerState {
     fn new() -> Self;
 
@@ -186,7 +241,7 @@ pub trait JammerState {
     fn initialise(
         &mut self,
         parameters: &mut StateParameters<impl JamBLErHal>
-    ) -> Option<StateReturn>;
+    ) -> Result<Option<StateReturn>, StateError>;
 
     fn launch(&mut self, parameters: &mut StateParameters<impl JamBLErHal>);
 
@@ -204,13 +259,13 @@ pub trait JammerState {
     /// ALWAYS INLINE IN IMPLEMENTATION!
     fn handle_radio_interrupt(
         &mut self, parameters: &mut StateParameters<impl JamBLErHal>
-    ) -> Option<StateReturn>;
+    ) -> Result<Option<StateReturn>, StateError>;
 
     /// Handle an interval timer interrupt.
     /// ALWAYS INLINE IN IMPLEMENTATION!
     fn handle_interval_timer_interrupt(
         &mut self, parameters: &mut StateParameters<impl JamBLErHal> 
-    ) -> Option<StateReturn>;
+    ) -> Result<Option<StateReturn>, StateError>;
 
     /// Is it valid to go from the self state to the new state.
     /// self -> new_state valid?
@@ -219,10 +274,11 @@ pub trait JammerState {
     /// Is it valid to go to the self state from the old_state
     /// new_state -> self valid?
     fn is_valid_transition_from(&mut self, old_state: &JamBLErState) -> Result<(), StateError>;
+
+
+    //TODO make a default implementation for transition_to and from, so less code repeat in state_transition
 }
 
-pub mod discover_aas;
-pub mod idle;
 
 /// Will hold a struct of every possible state.
 /// Necessary to avoid dynamic allocation but leverage polymorphism
@@ -230,8 +286,9 @@ pub mod idle;
 /// It will have a function that will return a reference to the right jammerstate implementation given the corresponding JamBLErState enum.
 pub struct StateStore {
     current_state: JamBLErState,
-    pub idle: idle::Idle,
-    pub discover_aas: discover_aas::DiscoverAas,
+    idle: idle::Idle,
+    discover_aas: discover_aas::DiscoverAas,
+    harvest_packets: harvest_packets::HarvestPackets,
 }
 
 /*
@@ -253,6 +310,7 @@ impl StateStore {
             current_state: JamBLErState::Idle,
             idle: idle::Idle::new(),
             discover_aas: discover_aas::DiscoverAas::new(),
+            harvest_packets: harvest_packets::HarvestPackets::new(),
         }
     }
 
@@ -284,13 +342,19 @@ impl StateStore {
                 state.is_valid_transition_to(&new_state)?;
                 // THESE ARE THE PARAMETERS FOR THE NEW STATE
                 state.stop(parameters);
-            }
+            },
             JamBLErState::DiscoveringAAs => {
                 let state = &mut self.discover_aas;
 
                 state.is_valid_transition_to(&new_state)?;
                 state.stop(parameters);
-            }
+            },
+            JamBLErState::HarvestingPackets => {
+                let state = &mut self.harvest_packets;
+
+                state.is_valid_transition_to(&new_state)?;
+                state.stop(parameters);
+            },
         };
 
         let state_return;
@@ -304,17 +368,25 @@ impl StateStore {
                 // This is identical for every case
                 state.is_valid_transition_from(&self.current_state)?;
                 state.config(parameters)?;
-                state_return = state.initialise(parameters);
+                state_return = state.initialise(parameters)?;
                 state.launch(parameters);
-            }
+            },
             JamBLErState::DiscoveringAAs => {
                 let state = &mut self.discover_aas;
 
                 state.is_valid_transition_from(&self.current_state)?;
                 state.config(parameters)?;
-                state_return = state.initialise(parameters);
+                state_return = state.initialise(parameters)?;
                 state.launch(parameters);
-            }
+            },
+            JamBLErState::HarvestingPackets => {
+                let state = &mut self.harvest_packets;
+
+                state.is_valid_transition_from(&self.current_state)?;
+                state.config(parameters)?;
+                state_return = state.initialise(parameters)?;
+                state.launch(parameters);
+            },
         };
 
         self.current_state = new_state;
@@ -338,7 +410,12 @@ impl StateStore {
                 let state = &mut self.discover_aas;
                 
                 state.update_state(parameters)
-            }
+            },
+            JamBLErState::HarvestingPackets => {
+                let state = &mut self.harvest_packets;
+                
+                state.update_state(parameters)
+            },
         }
     }
 
@@ -346,19 +423,24 @@ impl StateStore {
     #[inline]
     pub fn handle_radio_interrupt(
         &mut self, parameters: &mut StateParameters<impl JamBLErHal>
-    ) -> Option<StateReturn> {
+    ) -> Result<Option<StateReturn>, StateError> {
         match self.current_state {
             JamBLErState::Idle => {
                 let state = &mut self.idle;
 
                 // Following is same for every case
                 state.handle_radio_interrupt(parameters)
-            }
+            },
             JamBLErState::DiscoveringAAs => {
                 let state = &mut self.discover_aas;
 
                 state.handle_radio_interrupt(parameters)
-            }
+            },
+            JamBLErState::HarvestingPackets => {
+                let state = &mut self.harvest_packets;
+
+                state.handle_radio_interrupt(parameters)
+            },
         }
     }
 
@@ -366,19 +448,24 @@ impl StateStore {
     #[inline]
     pub fn handle_interval_timer_interrupt(
         &mut self, parameters: &mut StateParameters<impl JamBLErHal>
-    ) -> Option<StateReturn> {
+    ) -> Result<Option<StateReturn>, StateError> {
         match self.current_state {
             JamBLErState::Idle => {
                 let state = &mut self.idle;
 
                 // Following is same for every case
                 state.handle_interval_timer_interrupt(parameters)
-            }
+            },
             JamBLErState::DiscoveringAAs => {
                 let state = &mut self.discover_aas;
 
                 state.handle_interval_timer_interrupt(parameters)
-            }
+            },
+            JamBLErState::HarvestingPackets => {
+                let state = &mut self.harvest_packets;
+
+                state.handle_interval_timer_interrupt(parameters)
+            },
         }
     }
 }

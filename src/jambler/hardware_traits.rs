@@ -10,6 +10,8 @@ pub enum JamBLErHalError {
     InvalidChannel(u8),
 }
 
+
+
 /// The trait that a specific chip has to implement to be used by the jammer.
 /// 
 /// Reset can be called at any point.
@@ -56,6 +58,36 @@ pub trait JamBLErHal {
     /// Reads the access address from the receive buffer of you chip.
     /// Might be hacky for certain chips.
     fn read_discovered_access_address(&mut self)-> Option<(u32, i8)>;
+
+    /* // *** Harvesting packets *** */
+
+    /// Should configure the radio to receive all packets sent by the given 
+    /// access address on the given phy and channel.
+    /// Should enable crc checking (but not ignore failed checks) if the given crc_init is Some. Otherwise none.
+    fn config_harvest_packets(&mut self, access_address: u32, phy: BlePHY, channel: u8, crc_init : Option<u32>) -> Result<(), JamBLErHalError>;
+
+    /// Returns Some if a packet was received on the channel, phy and access address configured using the last config_harvest_packets. 
+    /// Regardless of whether the crc check failed/succeeded. 
+    /// 
+    /// In the Some case, Some contains a HalHarvestedPacket.
+    /// See the comments for that to know what it contains.
+    fn handle_harvest_packets_radio_interrupt(&mut self, calculate_crc_init : bool) -> Option<HalHarvestedPacket>;
+
+
+}
+
+/// Return information when requested to harvest packets.
+#[derive(Debug)] 
+pub struct HalHarvestedPacket {
+    /// Some if crc has been enabled by providing a Some(crc_init) value in the latest config_harvest_packets. True if the crc check was successfull, false if it wasn't.
+    pub crc_ok : Option<bool>,
+    /// Some if instructed to reverse calculate the crc init and able to do so. 
+    /// Then it contains the reversed crc for this packet as it has been received (might have been received with errors).
+    pub crc_init : Option<u32>,
+    /// The rssi, why not
+    pub rssi : i8,
+    pub first_header_byte : u8,
+    pub second_header_byte : u8,
 }
 
 

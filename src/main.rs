@@ -315,7 +315,7 @@ fn parse_command(command: String<U256>) -> Option<RTICCommand> {
                     if let Some(u32_value_aa) = hex_str_to_u32(param_1_aa) {
                         rprintln!("Received jam command for u32 addres {}", u32_value_aa);
                         //TODO change to proper command
-                        Some(RTICCommand::JamBLErTask(JamBLErTask::DiscoverAas))
+                        Some(RTICCommand::JamBLErTask(JamBLErTask::Jam))
                     } else {
                         // 1st param was not hex value
                         None

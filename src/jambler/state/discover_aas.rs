@@ -76,7 +76,7 @@ impl JammerState for DiscoverAas {
             while self.current_channel < self.channel_chain.len()  {
                 let channel : u8 = self.channel_chain[self.current_channel];
                 if channel < 0 || channel > 36 {
-                return Err(StateError::InvalidConfig("Channel chain empty for discovering AAs"));
+                return Err(StateError::InvalidConfig("Illegal channel in channel chain for discovering AAs"));
                 }
                 self.current_channel += 1;
             }
@@ -86,8 +86,8 @@ impl JammerState for DiscoverAas {
 
             // check if interval is at least 1.25 milliseconds
             // (the minimum for conInterval)
-            if self.interval < 1_250 {
-                return Err(StateError::InvalidConfig("Interval for discovering AAs was shorter than the minimum connection interval (1.25 ms)."));
+            if self.interval < 7_500 {
+                return Err(StateError::InvalidConfig("Interval for discovering AAs was shorter than the minimum connection interval (7.5 ms)."));
             }
 
             // Everything was ok and is set
@@ -104,7 +104,7 @@ impl JammerState for DiscoverAas {
     /// Empty AA cache
     fn initialise(
         &mut self, parameters: &mut StateParameters<impl JamBLErHal>
-    ) -> Option<StateReturn> {
+    ) -> Result<Option<StateReturn>, StateError> {
         // Fresh cache
         self.aa_cache = Queue::u8();
         // start listening on channel 0
@@ -116,16 +116,13 @@ impl JammerState for DiscoverAas {
         // Config the radio
         parameters.radio.prepare_for_config_change();
         if let Err(e) = parameters.radio.config_discover_access_addresses(self.phy , channel) {
-            rprintln!("Error init discovering AAs: {:?}",e);
-            panic!()
-            // TODO return gracefully so device can start to idle?
-            //return Err(StateError::JamBLErHalError(""));
+            return Err(StateError::JamBLErHalError("During configuration of discovering AAs\n ", e));
         }
 
         // Set us up to receive an interval timer interrupt every self.interval microseconds
         let mut ret = StateReturn::new();
         ret.timing_requirements = Some(IntervalTimerRequirements::Periodic(self.interval));
-        Some(ret)
+        Ok(Some(ret))
     }
 
     /// Starts receiving
@@ -212,10 +209,7 @@ impl JammerState for DiscoverAas {
             // Configure the radio
             parameters.radio.prepare_for_config_change();
             if let Err(e) = parameters.radio.config_discover_access_addresses(self.phy , channel) {
-                rprintln!("Error init discovering AAs: {:?}",e);
-                panic!()
-                // TODO return gracefully so device can start to idle?
-                //return Err(StateError::JamBLErHalError(""));
+                return Err(StateError::JamBLErHalError("During update of discovering AAs\n ", e));
             }
 
             // Launch the radio
@@ -245,12 +239,17 @@ impl JammerState for DiscoverAas {
     fn handle_radio_interrupt(
         &mut self,
         parameters: &mut StateParameters<impl JamBLErHal>
-    ) -> Option<StateReturn> {
+    ) -> Result<Option<StateReturn>, StateError> {
 
         // TODO let the function return whether or not it was found by the master
         if let Some((aa, rssi)) = parameters.radio.read_discovered_access_address() {
             TimeStamp::rprint_normal_with_micros_from_microseconds(parameters.current_time);
             rprintln!("Found access address {:#010x} with rssi {}", aa, rssi);
+
+
+            // TODO add to aa_cache, pop oldest if full
+            // It just depends on whether you want the most recent knowledge
+            // and want to remember master or slave etc... if you would do this
 
             // Build discovered access address
 
@@ -264,13 +263,13 @@ impl JammerState for DiscoverAas {
                 rssi: rssi,
                 sent_by_master: None,
             }));
-            Some(ret)
+            Ok(Some(ret))
         }
         else {
             // Delete later
             //TimeStamp::rprint_normal_with_micros_from_microseconds(instant_in_microseconds);
             //rprintln!("Discovering aas radio interrupt but not valid packet.");
-            None
+            Ok(None)
         }
     }
 
@@ -279,7 +278,7 @@ impl JammerState for DiscoverAas {
     fn handle_interval_timer_interrupt(
         &mut self,
         parameters: &mut StateParameters<impl JamBLErHal>
-    ) -> Option<StateReturn> {
+    ) -> Result<Option<StateReturn>, StateError> {
 
         // Change channel
         // Could do modulo, but I think it is very slow so I do it this way
@@ -291,13 +290,10 @@ impl JammerState for DiscoverAas {
 
         let channel = self.channel_chain[self.current_channel];
 
-
+        // Do the config change and return error if necessary.
         parameters.radio.prepare_for_config_change();
         if let Err(e) = parameters.radio.config_discover_access_addresses(self.phy , channel) {
-            rprintln!("Error changing channel while discovering AAs: {:?}",e);
-            panic!()
-            // TODO return gracefully so device can start to idle?
-            //return Err(StateError::JamBLErHalError(""));
+            return Err(StateError::JamBLErHalError("While changing channel while discovering AAs\n ", e));
         }
         parameters.radio.receive();
 
@@ -305,7 +301,7 @@ impl JammerState for DiscoverAas {
         TimeStamp::rprint_normal_with_micros_from_microseconds(parameters.current_time);
         rprintln!(" listening for AAs on channel {}", channel);
 
-        None
+        Ok(None)
     }
 
     /// Should only go to the idle state.

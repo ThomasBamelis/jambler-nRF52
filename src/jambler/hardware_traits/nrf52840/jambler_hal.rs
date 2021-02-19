@@ -1,3 +1,4 @@
+use crate::jambler::HalHarvestedPacket;
 use nrf52840_hal as hal; // Embedded_hal implementation for my chip
 use hal::pac::RADIO;
 
@@ -26,8 +27,8 @@ impl Nrf52840JamBLEr {
     pub fn new(radio : RADIO) -> Nrf52840JamBLEr {
         Nrf52840JamBLEr {
             radio_peripheral : radio,
-            send_buffer : [0; 300],
-            receive_buffer : [0; 300],
+            send_buffer : [0; 300], // has to be 258 at least = max pdu length
+            receive_buffer : [0; 300], // has to be 258 at least = max pdu length
             current_phy : None,
             current_channel : None,
         }
@@ -35,6 +36,9 @@ impl Nrf52840JamBLEr {
 
     /// Will return what is necessary for the frequency register to set the frequency to the given channel.
     /// If the channel is invalid it will default to 0.
+    /// 
+    /// Channel index is the one were 37, 38 and 39 are advertising addresses.
+    /// 
     #[inline]
     fn channel_to_frequency_register_value(channel_index : u8 ) -> u8 {
         // See ble specification page 2864 to make sense of this
@@ -88,10 +92,22 @@ impl JamBLErHal for Nrf52840JamBLEr {
     /// Radio will always be disabled because of prepare function when entering this.
     #[inline]
     fn config_discover_access_addresses(&mut self, phy : BlePHY, channel : u8) -> Result<(), JamBLErHalError> {
+
+
+        if self.radio_peripheral.power.read().power().is_disabled() {
+            rprintln!("ERROR: power disabled while harvest packet config change");
+            panic!()
+        }
+        if !self.radio_peripheral.state.read().state().is_disabled() {
+            rprintln!("ERROR: radio not disabled while harvest packet config change");
+            panic!()
+        }
+
         // Should only listen on general purpose channels. Remember u8 is unsigned.
         if channel > 36 {
             return Err(JamBLErHalError::InvalidChannel(channel));
         }
+
 
 
         let radio = &mut self.radio_peripheral;
@@ -378,7 +394,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
     fn prepare_for_config_change(&mut self) {
 
         // If the radio is not disabled, disable it
-        if self.radio_peripheral.state.read().state().is_disabled() {
+        if !self.radio_peripheral.state.read().state().is_disabled() {
             // Get the radio into an idle state before resetting its registers
             // Reset the disabled event flag.
             self.radio_peripheral.events_disabled.reset();
@@ -435,7 +451,402 @@ impl JamBLErHal for Nrf52840JamBLEr {
         while self.radio_peripheral.events_disabled.read().bits() != 0 {}
         self.radio_peripheral.events_disabled.reset();
     }
+
+
+
+    /*   // ***           packet harvesting               *** */
+
+
+    /// Should configure the radio to receive all packets sent by the given 
+    /// access address on the given phy and channel.
+    /// Should enable crc checking (but not ignore failed checks) if the given crc_init is Some. Otherwise none.
+    fn config_harvest_packets(&mut self, access_address: u32, phy: BlePHY, channel: u8, crc_init : Option<u32>) -> Result<(), JamBLErHalError> {
+
+        if self.radio_peripheral.power.read().power().is_disabled() {
+            rprintln!("ERROR: power disabled while harvest packet config change");
+            panic!()
+        }
+        if !self.radio_peripheral.state.read().state().is_disabled() {
+            rprintln!("ERROR: radio not disabled while harvest packet config change");
+            panic!()
+        }
+
+        match crc_init {
+            None => {
+                rprintln!("Configure harvest packets\naa 0x{:08X}\nphy {:?}\nchannel {}\ncrc None", access_address, phy, channel);
+
+            }
+            Some(c) => {
+                rprintln!("Configure harvest packets\naa 0x{:08X}\nphy {:?}\nchannel {}\ncrc 0x{:06X}", access_address, phy, channel, c);
+
+            }
+        }
+
+        // Should only listen on general purpose channels. Remember u8 is unsigned.
+        if channel > 36 {
+            return Err(JamBLErHalError::InvalidChannel(channel));
+        }
+
+        let radio = &mut self.radio_peripheral;
+
+
+        compiler_fence(SeqCst);
+
+        // Set access address
+        // Select reception on 0th of 0-7 possible AAs to listen for
+        radio.rxaddresses.write(|w| w.addr0().enabled());
+        // Fill this 0th AA with the given access address
+        radio.base0.write(|w| unsafe{w.bits(access_address << 8)});
+        radio.prefix0.write(|w| unsafe {w.ap0().bits((access_address >> 24) as u8)} );
+
+        // Set the PHY mode and the corresponding preamble and cilen and termlen
+        match phy {
+            BlePHY::Uncoded1M => {
+                radio.mode.write(|w| w.mode().ble_1mbit());
+                radio.pcnf0.write(|w| unsafe{w.plen()._8bit().cilen().bits(0).termlen().bits(0)});
+            },
+            BlePHY::Uncoded2M => {
+                radio.mode.write(|w| w.mode().ble_2mbit());
+                radio.pcnf0.write(|w| unsafe{w.plen()._16bit().cilen().bits(0).termlen().bits(0)});
+            },
+            BlePHY::CodedS2 => {
+                radio.mode.write(|w| w.mode().ble_lr500kbit());
+                radio.pcnf0.write(|w| unsafe{w.plen().long_range().cilen().bits(2).termlen().bits(3)});
+            },
+            BlePHY::CodedS8 => {
+                radio.mode.write(|w| w.mode().ble_lr125kbit());
+                radio.pcnf0.write(|w| unsafe{w.plen().long_range().cilen().bits(2).termlen().bits(3)});
+            }
+        }
+
+        // Set the frequency to the channel
+        let freq = Nrf52840JamBLEr::channel_to_frequency_register_value(channel);
+        radio.frequency.write(|w| unsafe {  w.frequency().bits(freq)}); 
+
+        // Set dewhitening initial value to channel
+        // The mask is unnecessary but beautiful
+        radio.datawhiteiv.write(|w| unsafe{w.datawhiteiv().bits(0b01000000 | channel)});
+
+        // Set the receive buffer
+        let ptr = self.receive_buffer.as_ptr() as u32;
+        radio.packetptr.write(|w| unsafe { w.packetptr().bits(ptr) });
+
+
+
+
+        // Set the shortcuts of the state machine
+        radio.shorts.write(|w| w
+            // when rx enable task is triggered
+            // start listening immediately after ramp up
+            .rxready_start().enabled()
+            // after a packet is received, immediately 
+            .end_start().enabled()
+            // when the access address matches, take an rssi sample of the signal
+            .address_rssistart().enabled()
+            // no information on this is in the datasheet
+            // but for safety I will inlcude it.
+            // This is the only rssistop shortcut I see
+            // but it quite speaks for itself.
+            .disabled_rssistop().enabled()
+        );
+
+        // Enable interrupts on receiving a packet = the end event
+        radio.intenset.write(|w| w.end().set());
+
+        // Everything under here was different in damiens code
+        // however, for some parts I really do not see why he did what he did, it seems very random
+        // I will configure it as I think is normal and see if it works
+
+        // Set the header of the PDU for BLE so that the radio peripheral can read the length of the packet sent
+        // s1incl is 0 automatic and crcinc is 0 (crc not in len as in ble) is automatic as well
+        // WE DO INCLUDE S1 ALWAYS BECAUSE THE DATA PHYSICAL PACKET HEADER MIGHT BE 3 BYTES AND WE CANNOT SET THE PAYLOAD TO MORE THAN 255
+        radio.pcnf0.write(|w| unsafe{w.s0len().bit(true).lflen().bits(8).s1len().bits(8)});
+
+        // enable packet whitening (little endian is default) and set address length
+        radio.pcnf1.write(|w| unsafe { w
+            // 4-byte access address = 3-Byte Base Address + 1-Byte Address Prefix
+            .balen().bits(3)
+            // Enable Data Whitening over PDU+CRC
+            .whiteen().set_bit()
+        });
+
+        // From the rubble source code
+        // `x^24 + x^10 + x^9 + x^6 + x^4 + x^3 + x + 1`
+        //pub const CRC_POLY: u32 = 0b00000001_00000000_00000110_01011011;
+
+        // you can always configure the crc poly, no harm in that
+        // the x^24 bit will be ignored, but by the way crc is implemented on the radio peripheral it will still be okay.
+        const CRC_POLY: u32 = 0b00000001_00000000_00000110_01011011;
+        radio.crcpoly.write(|w| unsafe {w.crcpoly().bits(CRC_POLY & 0x00FFFFFF)});
+
+        // to be shure no misunderstandings happen, reset the registers which can be altered differently by a different control flow
+        radio.crccnf.reset();
+        radio.crcinit.reset();
+
+        match crc_init {
+            Some(crc_init_value) => {
+
+                // we have a crc, set it
+                // config the crc
+                radio.crccnf.write(|w| {
+                    // skip address since only the S0, Length, S1 and Payload need CRC. This corresponds to the PDU of the packet which corresponds to the BLE specification.
+                    // 3 Bytes = CRC24
+                    w.skipaddr().skip().len().three()
+                });
+
+                // set crc init
+                radio.crcinit.write(|w| unsafe{w.crcinit().bits(crc_init_value & 0x00FFFFFF)});
+
+                //TODO other stuff that is different, packet length maybe
+                // Receive the whole packet as you normally would
+                // Not strictly necessary but more clear
+                
+                // The header can be 16 or 24 bits
+                // depending on the 0b0000_0100 bit, indicating CTE info field presence (24-bit header, new last byte).
+                // S0 and LEN field always take care of the first 16 bits
+                // However the payload might contain this extra byte first.
+                // This means the maximum nrf payload has to be the maximum BLE payload + 1 byte = 255 + 1 = 256  
+
+                // However!!!!!! The maximum payload length is 255. 
+                // For this reason S1 has always been included to account for the 255 scenario. This might means that if the Length is 0 the first byte of the crc might be picked up as well, but that is no problem
+                
+                radio.pcnf1.write(|w| unsafe { w
+                    // Set max payload to 255 (highest possible)
+                    .maxlen().bits(255 as u8)
+                    // disable static length (packet LENGTH + statlen receiving)
+                    .statlen().bits(0 as u8)
+                });
+            }
+            None => {
+                // set CRC to disabled to be sure
+                // Setting the length to 0 disables crc checking
+                radio.crccnf.write(|w| w.len().disabled());
+
+                // Whatever we receive, we want 3 bytes more to get the crc value
+                // This means that we will have to check the length field of the packet to find were in the buffer the crc will be (and if it fits in 255-3).
+                radio.pcnf1.write(|w| unsafe { w
+                    // Set max payload to 255 (highest possible)
+                    .maxlen().bits(255 as u8)
+                    // Always receive 3 bytes more (the crc) than the LENGTH field of the incoming packet specifies.
+                    .statlen().bits(3 as u8)
+                });
+            },
+        }
+
+
+        compiler_fence(SeqCst);
+
+        // TODO delete. This is stuff I tried to start receiving packets as I should. Read out the main registers
+        radio.txpower.write(|w| w.txpower()._0d_bm());
+
+        rprintln!("Configurations after config:\nMode {:034b}\nModeconf {:034b}\nPCNF0 {:034b}\nPCNF1 {:034b}\nBase0 {:034b}\nPrefix0 {:034b}\nRXaddresses {:034b}\nShorts {:034b}\nInterrupts {:034b}", radio.mode.read().mode().bits(), radio.modecnf0.read().bits(), radio.pcnf0.read().bits(), radio.pcnf1.read().bits(), radio.base0.read().bits(), radio.prefix0.read().bits(), radio.rxaddresses.read().bits(), radio.shorts.read().bits(), radio.intenset.read().bits());
+
+        let f = radio.frequency.read().frequency().bits();
+        rprintln!("Channel frequency {} = {}MHz. (map is default = {})", f, 2000 + f as u32, radio.frequency.read().map().is_default());
+
+
+        Ok(())
+    }
+
+    /// Returns Some if the packet just received was the first packet in the connection event and the boolean inside is true if the crc check was passed, false otherwise.
+    /// Otherwise None.
+    fn handle_harvest_packets_radio_interrupt(&mut self, calculate_crc_init : bool) -> Option<HalHarvestedPacket> {
+
+        //TODO delete
+        rprintln!("Logical address match: {} (should be 1)", self.radio_peripheral.rxmatch.read().bits());
+
+
+        compiler_fence(SeqCst);
+        // Reset the END event
+        self.radio_peripheral.events_end.reset();
+
+        // nrf says the ptr has to be reset always, so do it
+        let ptr = self.receive_buffer.as_ptr() as u32;
+        self.radio_peripheral.packetptr.write(|w| unsafe { w.packetptr().bits(ptr) });
+
+        // read rssi. Value between 0 and 127. Should be made negative (rssi is always represented negative). RSSI = - rssisample dBm
+        let rssi : i8 = - ( (self.radio_peripheral.rssisample.read().bits() as u8) as i8);
+
+
+        compiler_fence(SeqCst);
+
+        let crc_error_option: Option<bool>;
+        let crc_init_option: Option<u32>;
+
+        // find out if the we were instructed to check the crc by checking if we enabled it before or not
+        let crc_check_disabled = self.radio_peripheral.crccnf.read().len().is_disabled();
+        if !crc_check_disabled {
+            let crc_error = self.radio_peripheral.crcstatus.read().crcstatus().is_crcerror();
+            crc_error_option = Some(crc_error);
+        }
+        else {
+            crc_error_option = None;
+        }
+
+        // If we were instructed and if we can, reverse calculate the crc
+
+        // payload overflow (if payload was bigger than 252 and we wanted 3 extra with statlen)
+        let maxlen_overflow = self.radio_peripheral.pdustat.read().pdustat().is_greater_than();
+        // Alternative: pdu length + 3 = written to read buffer length
+
+        if calculate_crc_init && !maxlen_overflow {
+            // TODO I could just enable crc and read the (check failed) crc from the rxcrc register right?
+            let mut pdu_length : u16;
+        
+            // Check 16 or 24 bit header
+            // Check S0 holding the first header byte with CP indicating 24-bit headre or not.
+            // TODO try if it is the same layout as shown in the specs if you set it to big endian, now have to reverse it if I look at damiens code.
+            // TODO see vol 6 part B sec 1.2 Bit Ordering
+            //let cte_info_header_byte_present : bool = self.receive_buffer[0] & 0b0000_0100 != 0;
+            let cte_info_header_byte_present : bool = self.receive_buffer[0] & 0b0010_0000 != 0;
+
+            if cte_info_header_byte_present {
+                // 24-bit = 3 byte header
+                pdu_length = 3;                
+            }
+            else {
+                // 16-bit = 2 byte header
+                pdu_length = 2;
+            }
+
+            // Get payload length
+            let payload_length = self.receive_buffer[1] as u16;
+            pdu_length += payload_length;
+
+            // Get received CRC calue
+            // Remember: the CRC is most significant byte and bit over the air while the payload is received least significant bit and byte.
+            // This means that the first byte of the actual payload will be sent last on air
+            // This causes the sniffer to interpret this wrong!
+            // We need to reverse the bits and the first byte will be the last byte of the CRC
+            // TODO wrong under here HOWEVER damiens code does not do this and maybe the crc reverse needs it this (wrong) way!
+            // NRF datasheet: the static payload add-on sits between the payload and CRC = appended to it. Looks like it is put in the buffer as received on air
+            
+            // Sits in the buffer right after the PDU, and indexes start from 0:
+            let crc_buffer_offset = pdu_length as usize;
+            let crc_value = 
+                (self.receive_buffer[crc_buffer_offset] as u32) |
+                (self.receive_buffer[crc_buffer_offset + 1] as u32) << 8 |
+                (self.receive_buffer[crc_buffer_offset + 2] as u32) << 16;
+            
+            /*
+            let crc_value = 
+                (reverse_bits(self.receive_buffer[2]) as u32) |
+                (reverse_bits(self.receive_buffer[1]) as u32) << 8 |
+                (reverse_bits(self.receive_buffer[0]) as u32) << 16;
+            */
+
+            // calculate crc init
+            // give them a buffer where you step over th 3 CRC bytes at the beginning
+            let crc_init = reverse_calculate_crc_init(crc_value, &self.receive_buffer[3..], pdu_length);
+            crc_init_option = Some(crc_init);
+        }
+        else {
+            crc_init_option = None;
+        }
+
+        const print : bool = true;
+        if print {
+            let mut pdu_length : u16;
+            let cte_info_header_byte_present : bool = self.receive_buffer[0] & 0b0010_0000 != 0;
+            if cte_info_header_byte_present {
+                pdu_length = 3;                
+            }
+            else {
+                pdu_length = 2;
+            }
+            let payload_length = self.receive_buffer[1] as u16;
+            pdu_length += payload_length;
+
+
+            rprintln!("Received packet, crc enabled = {}", !crc_check_disabled);
+            //TODO change back to pdu_length
+            for i in 0..2 {
+                rprintln!("{:#02x} {:#010b} byte {}",self.receive_buffer[i as usize],self.receive_buffer[i as usize],i);
+            }
+
+            // get the crc as the chip thinks it is
+            if !crc_check_disabled {
+                rprintln!("Received crc: {:#08x} = {:#026b}", self.radio_peripheral.rxcrc.read().rxcrc().bits(), self.radio_peripheral.rxcrc.read().rxcrc().bits());
+            }
+            if let Some(crc_error) = &crc_error_option {
+                rprintln!("Crc check succeeded: {}", !crc_error);
+            }
+            if let Some(ini) = &crc_init_option {
+                rprintln!("Calculated reversed crc init: {:#08x} = {:#026b}", ini, ini);
+            }
+        }
+
+        // return it
+        // Always return some, we have configured the radio to only receive interrupts on packet reception.
+        Some(HalHarvestedPacket {
+            crc_ok : crc_error_option,
+            crc_init : crc_init_option,
+            rssi,
+            first_header_byte : self.receive_buffer[0],
+            second_header_byte : self.receive_buffer[1],
+        })
+
+        //TODO if you can access crc (no maxlen oveflow), you can reverse it with the entire pdu including header. Becuase the next packet ist still 150 micros away, we might be able to do a for loop with max length of 258 before that hits in this radio interrupt handler. Remember the radio is already listening again because of the short. This circumvents returning the whole packet all the way back to jambler. But it is very dirty and maybe not extensible to other chips
+
+
+        // TODO dont forget to add these function in the harvest_packets functions
+        // TODO adapt the return of this interface function to your needs
+
+    }
+
+
+    //TODO WHEN SENDING ON BLE CODED PHY YOU HAVE TO USE PHYEND SHORTCUT AND EVENT!
+
+
 }
+
+
+
+
+
+
+
+
+
+
+
+/***************************************************/
+/* // ***          UTILITY  FUNCTIONS          *** */
+/***************************************************/
+
+
+//TODO move some to jambler bit stream processing file
+/// BTLE CRC reverse routine, originally written by Mike Ryan,
+/// Dominic Spill and Michael Ossmann, taken from ubertooth_le.
+/// 
+/// TODO test this P3089 BLE
+fn reverse_calculate_crc_init(received_crc_value : u32, pdu: & [u8], pdu_length : u16) -> u32 {
+
+    let mut state : u32 = received_crc_value;
+	let lfsr_mask: u32 = 0xb4c000;
+
+	for i in (0..pdu_length).rev() {
+		let cur : u8 = pdu[i as usize];
+		for j in 0..8 {
+            // crc = 24 bit, 24th will be rightmost bit
+			let top_bit : u8 = (state >> 23) as u8; 
+			state = (state << 1) & 0xffffff;
+			state |= (top_bit ^ ((cur >> (7 - j)) & 1)) as u32;
+			if top_bit != 0 {
+				state ^= lfsr_mask;
+            }
+		}
+	}
+
+	let mut ret : u32 = 0;
+	for i in 0..24 {
+		ret |= ((state >> i) & 1) << (23 - i);
+    }
+
+	return ret;
+}
+
+
 
 //TODO wrong for sure
 // From Damien Cauquil
@@ -640,17 +1051,22 @@ fn is_valid_discover_header(first_byte : u8, second_byte : u8) -> bool {
     true
 }
 
-/*
+
 #[inline]
-fn reverse_bits(byte: u8) -> u8 {
+pub fn reverse_bits(byte: u8) -> u8 {
     let mut reversed_byte : u8 = 0;
     // Go right to left over original byte, building and shifting the reversed one in the process
     for bit_index in 0..8 {
         // Move to left to make room for new bit on the right (new LSB)
         reversed_byte = reversed_byte << 1;
         // If byte is 1 in its indexed place, set 1 to right/LSB reversed
-        reversed_byte |= if byte & (1 << bit_index) == 1 {0b0000_0001} else {0b0000_0000};
+        if byte & (1 << bit_index) != 0 {
+            reversed_byte = reversed_byte | 0b0000_0001;
+        }
+        else {
+            reversed_byte = reversed_byte | 0b0000_0000;
+        }
+        //reversed_byte |= if byte & (1 << bit_index) != 0 {0b0000_0001} else {0b0000_0000};
     }
     reversed_byte
 }
-*/

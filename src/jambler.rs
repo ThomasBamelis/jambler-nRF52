@@ -10,7 +10,7 @@ use heapless::{consts::*, String};
 use state::IntervalTimerRequirements;
 use state::StateConfig;
 use state::StateStore;
-use state::{StateParameters, StateReturn, JammerState};
+use state::{StateParameters, StateReturn};
 use hardware_traits::*;
 
 use rtt_target::rprintln;
@@ -35,6 +35,7 @@ pub struct JamBLEr<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> {
 pub enum JamBLErState {
     Idle,
     DiscoveringAAs,
+    HarvestingPackets,
 }
 
 /// Use this to pass parameters, which you can use in the state conf.
@@ -50,6 +51,7 @@ pub enum JamBLErTask {
     UserInterrupt,
     Idle,
     DiscoverAas,
+    Jam,
 }
 
 
@@ -102,6 +104,34 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                 config.channel_chain = Some(cc);
                 
                 self.state_transition(JamBLErState::DiscoveringAAs, config);
+            }
+            JamBLErTask::Jam => {
+                // TODO specify all in command or I2C communication
+                let mut config = StateConfig::new();
+
+                // for now, listen on legacy phy, all data channels 
+                // max interval for 100, advertising AA
+                config.access_address = Some(0xAF9ABB1B);
+                config.phy = Some(BlePHY::Uncoded1M);
+                config.interval = Some(4_000_000);
+                let mut cc : Vec<u8, U64> = Vec::new();
+                for i in 24..=24 {
+                    cc.push(i).unwrap();
+                }
+                config.channel_chain = Some(cc);
+
+                config.number_of_intervals = Some(10);
+
+                // no crc init
+                config.crc_init = Some(0x555555);
+
+                // interval timer 500 ppm so to speak
+                config.interval_timer_ppm = Some(500);
+
+                // interval timer 500 ppm so to speak
+                config.long_term_timer_ppm = Some(500);
+
+                self.state_transition(JamBLErState::HarvestingPackets, config);
             }
         };
     }
@@ -173,7 +203,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                 }
             }
             Err(state_error) => {
-                rprintln!("ERROR: invalid state transition: {:?}", state_error);
+                rprintln!("ERROR: invalid state transition\n{:?}", state_error);
                 panic!()
             }
         }
@@ -197,16 +227,27 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
 
 
         // process return
-        if let Some(ret) = state_return {
-            // Obey timing requirements ASAP
-            if let Some(timing_requirements) = &ret.timing_requirements {
-                self.set_interval_timer(timing_requirements);
+        match state_return {
+            Ok(ok_state_return) => {
+                match ok_state_return {
+                    Some(ret) => {
+                        // Obey timing requirements ASAP
+                        if let Some(timing_requirements) = &ret.timing_requirements {
+                            self.set_interval_timer(timing_requirements);
+                        }
+    
+                        // Process the return value.
+                        self.process_state_return_value(ret)
+                    },
+                    None => {
+                        None
+                    }
+                }
+            },
+            Err(state_error) => {
+                rprintln!("ERROR: by state in radio interrupt\n{:?}", state_error);
+                panic!()
             }
-
-            self.process_state_return_value(ret)
-        }
-        else {
-            None
         }
     }
 
@@ -232,16 +273,27 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
             .handle_interval_timer_interrupt(parameters);
 
         // process return
-        if let Some(ret) = state_return {
-            // Obey timing requirements ASAP
-            if let Some(timing_requirements) = &ret.timing_requirements {
-                self.set_interval_timer(timing_requirements);
+        match state_return {
+            Ok(ok_state_return) => {
+                match ok_state_return {
+                    Some(ret) => {
+                        // Obey timing requirements ASAP
+                        if let Some(timing_requirements) = &ret.timing_requirements {
+                            self.set_interval_timer(timing_requirements);
+                        }
+    
+                        // Process the return value.
+                        self.process_state_return_value(ret)
+                    },
+                    None => {
+                        None
+                    }
+                }
+            },
+            Err(state_error) => {
+                rprintln!("ERROR: by state in interval timer interrupt\n{:?}", state_error);
+                panic!()
             }
-
-            self.process_state_return_value(ret)
-        }
-        else {
-            None
         }
     }
 
@@ -257,6 +309,9 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
     fn process_state_return_value(&mut self, return_type : StateReturn) -> Option<JamBLErReturn> {
         //TODO
         // TODO will most likely need a return t
+        if let Some(m) = return_type.state_message {
+            rprintln!("State message: {:?}",m);
+        }
         Some(JamBLErReturn::NoReturn)
     }
 }

@@ -76,6 +76,7 @@ impl TimeStamp {
     }
 
     pub fn rprintln_normal_with_micros(&self) {
+        rprintln!("");
         self.rprint_normal_with_micros();
         rprintln!("");
     }
