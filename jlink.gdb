@@ -5,11 +5,11 @@ set history filename .gdb-history
 set history size 1000
 
 # connect to file
-#file target/thumbv7em-none-eabihf/debug/rust-jammer
-file target/thumbv7em-none-eabihf/release/rust-jammer
+file target/thumbv7em-none-eabihf/debug/rust-jammer
+#file target/thumbv7em-none-eabihf/release/rust-jammer
 # changed this to connect to raspberry pi which is connected to the JLink
-#target remote localhost:2331
-target remote raspberrypi.local:2331
+target remote localhost:2331
+#target remote raspberrypi.local:2331
 
 monitor reset
 
@@ -28,7 +28,7 @@ break HardFault
 break rust_begin_unwind 
 
 # *try* to stop at the user entry point (it might be gone due to inlining)
-break main
+#break main
 
 # Semihosting is a debugging tool that is built in to most ARM-based microcontrollers. 
 # It allows you to use input and output functions on a host computer that get forwarded to your microcontroller over a hardware debugging tool (e.g. ST-LINK). 
@@ -42,5 +42,5 @@ break main
 load
 
 # start the process but immediately halt the processor
-stepi
-#continue
+#stepi
+continue

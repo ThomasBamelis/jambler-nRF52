@@ -112,7 +112,8 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                 // for now, listen on legacy phy, all data channels 
                 // max interval for 100, advertising AA
                 config.access_address = Some(0xAF9ABB1B);
-                config.phy = Some(BlePHY::Uncoded1M);
+                config.phy = Some(BlePHY::CodedS8);
+                config.slave_phy = Some(BlePHY::CodedS8);
                 config.interval = Some(4_000_000);
                 let mut cc : Vec<u8, U64> = Vec::new();
                 for i in 24..=24 {
@@ -120,7 +121,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                 }
                 config.channel_chain = Some(cc);
 
-                config.number_of_intervals = Some(10);
+                config.number_of_intervals = Some(1);
 
                 // no crc init
                 config.crc_init = Some(0x555555);
@@ -145,7 +146,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
     /// Helper function for setting the interval timer.
     #[inline]
     fn set_interval_timer(&mut self, req: &IntervalTimerRequirements) {
-        //rprintln!("Setting interval timer: {:?}", &req);
+        rprintln!("Setting interval timer: {:?}", &req);
         match req {
             IntervalTimerRequirements::NoChanges => {}
             IntervalTimerRequirements::NoIntervalTimer => {
@@ -324,7 +325,7 @@ pub enum JamBLErReturn {
 }
 
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BlePHY {
     Uncoded1M,
     Uncoded2M,

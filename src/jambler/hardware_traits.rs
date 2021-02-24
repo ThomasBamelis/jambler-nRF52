@@ -71,7 +71,7 @@ pub trait JamBLErHal {
     /// 
     /// In the Some case, Some contains a HalHarvestedPacket.
     /// See the comments for that to know what it contains.
-    fn handle_harvest_packets_radio_interrupt(&mut self, calculate_crc_init : bool) -> Option<HalHarvestedPacket>;
+    fn handle_harvest_packets_radio_interrupt(&mut self) -> Option<HalHarvestedPacket>;
 
 
 }
@@ -80,10 +80,10 @@ pub trait JamBLErHal {
 #[derive(Debug)] 
 pub struct HalHarvestedPacket {
     /// Some if crc has been enabled by providing a Some(crc_init) value in the latest config_harvest_packets. True if the crc check was successfull, false if it wasn't.
-    pub crc_ok : Option<bool>,
+    pub crc_ok : bool,
     /// Some if instructed to reverse calculate the crc init and able to do so. 
     /// Then it contains the reversed crc for this packet as it has been received (might have been received with errors).
-    pub crc_init : Option<u32>,
+    pub crc_init : u32,
     /// The rssi, why not
     pub rssi : i8,
     pub first_header_byte : u8,

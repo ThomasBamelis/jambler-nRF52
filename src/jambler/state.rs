@@ -59,6 +59,8 @@ pub struct StateConfig {
     pub interval_timer_ppm : Option<u32>,
     /// The clock drift in ppm of the long term timer, which provides the current_time timestamp.
     pub long_term_timer_ppm : Option<u32>,
+    /// The phy of the slave
+    pub slave_phy : Option<BlePHY>,
 }
 
 impl StateConfig {
@@ -82,6 +84,7 @@ impl StateConfig {
             number_of_intervals: None,
             interval_timer_ppm : None,
             long_term_timer_ppm : None,
+            slave_phy : None,
         }
     }
 }
@@ -130,9 +133,9 @@ pub enum StateMessage {
     /// 
     AccessAddress(DiscoveredAccessAddress),
     /// An enum holding a harvested packet and a boolean indicating whether or not the sniffer has completed listening on all the channels of his channel chain.
-    HarvestedPacket(HarvestedPacket, bool),
+    HarvestedSubevent(HarvestedPacket, Option<HarvestedPacket>, bool),
     /// Holds the channel index of an unused channel (listened for max_conn_interval * number_intervals and received nothing) and a boolean indicating whether or not the sniffer has completed listening on all the channels of his channel chain.
-    UnusedChannel(u8, bool)
+    UnusedChannel(u8, bool),
 }
 
 /// Struct for letting a state return something

@@ -27,7 +27,10 @@ const APP: () = {
 
     /// Initialises the application using late resources.
     ///
-    #[init()]
+    /// This is primarily to grab ownership of the resources and turn them into my structs.
+    /// But the variables will be copied (moved) in to their static places only after this function exits.
+    /// Any real initialisation should be done in the initialise_late_resources task which gets spawned exactly once right after the init function.
+    #[init(spawn = [initialise_late_resources])]
     fn init(ctx: init::Context) -> init::LateResources {
         // This enables the high frequency clock as far as I am aware.
         // This is necessary for the bluetooth and uart module to run.
@@ -51,8 +54,7 @@ const APP: () = {
             rts: None,
         };
         let uart_device: hal::pac::UARTE1 = ctx.device.UARTE1;
-        let mut uarte = SerialController::new(uart_device, uart_pins);
-        //rprintln!("Created UARTE from device UARTE1.");
+        let uarte = SerialController::new(uart_device, uart_pins);
 
         // setup jammer
         let radio: hal::pac::RADIO = ctx.device.RADIO;
@@ -63,40 +65,10 @@ const APP: () = {
         let interval_nrf_timer = Nrf52840IntervalTimer::new(interval_timer_per);
         
         let jambler = JamBLEr::new(nrf_jambler, nrf_timer, interval_nrf_timer);
-        //rprintln!("Initialised jammer.");
 
-        //rprintln!("Spawned the software task.");
+        // Spawn the late resources initialiser, so any initialisation for which the resources must be in their final memory place can be done there.
+        ctx.spawn.initialise_late_resources().ok();
 
-        // Start listening
-        uarte.start_listening();
-        //rprintln!("Started listening on uart.");
-
-        let mut welcome: String<U256> = String::new();
-        welcome
-            .push_str(
-                "\r\n#################\
-                          \r\n#  \\|/          #\
-                          \r\n# --o-- JamBLEr #\
-                          \r\n#  /|\\          #\
-                          \r\n#################\r\n",
-            )
-            .unwrap();
-        uarte.send_string(welcome);
-        welcome = String::new();
-        welcome.push_str("\r\nWelcome my friend!\r\nPress backtick ` to interrupt at any point during execution.\r\nBackspace is supported but will not remove written characters from your screen.\r\nReset button works.\r\nType a command and press enter:\r\n").unwrap();
-        uarte.send_string(welcome);
-
-        // TODO delete this when solved
-        welcome = String::new();
-        welcome.push_str("\r\nThis build will echo you commands after sending a first interrupt.\r\nSome unknown bug causes the first character you send to not be received, so send a dummy one as well first.\r\n").unwrap();
-        uarte.send_string(welcome);
-        welcome = String::new();
-        welcome.push_str("However, I think it is a problem with minicom not sending raw information\r\nRight now when you press enter it sends linefeed instead of new line\r\nThe first received character is always \\0, which might be another minicom thing maybe?\r\n").unwrap();
-        uarte.send_string(welcome);
-
-        //rprintln!("Welcome message sent.");
-
-        rprintln!("Initialisation complete.");
         init::LateResources {
             dummy: 6,
             uarte,
@@ -112,6 +84,13 @@ const APP: () = {
             cortex_m::asm::wfi();
         }
     }
+
+    // TODO you can only have 7 priorities for the best performance because the nrf52840 has 3bit arm interrupt priority bits (and 0 is for idle task)
+    /*
+    Tasks can have priorities in the range 1..=(1 << NVIC_PRIO_BITS) where NVIC_PRIO_BITS is a constant defined in the device crate.
+    The idle task has a non-configurable static priority of 0, the lowest priority. Tasks can have the same priority.
+    Tasks with the same priority do not preempt each other.
+    */
 
     /// A handler for radio events
     #[task(binds = RADIO ,priority = 7, resources = [jambler, dummy])]
@@ -171,6 +150,35 @@ const APP: () = {
         ctx.resources.jambler.lock(|jambler| {
             jambler.handle_timer_interrupt();
         });
+    }
+
+
+    /// Initialise the late resources after they have been copied into their static place.
+    /// 
+    /// ANY INITIALISING THAT HAS TO BE DONE BY GIVING A POINTER TO A BUFFER IN A LATER RESOURCE HAS TO BE DONE HERE AND NOT IN INIT!
+    /// 
+    /// Has same priority as command dispatcher for now. 
+    /// Interrupts are already enabled here for the processor.
+    #[task(priority = 2, resources = [jambler, uarte])]
+    fn initialise_late_resources(mut ctx: initialise_late_resources::Context) {
+        // Start listening on uart
+        // Only here you can because only from this point on you can give them a pointer to the right buffer
+        ctx.resources.uarte.lock(|uarte| {
+            // Print the welcome message
+            print_welcome_message(uarte);
+            // Start listening. Initially this will only do something when the interrupt is received.
+            uarte.start_listening();
+            // Start listening for a command
+            uarte.init_receive_string();
+        });
+
+        // The radio buffers will only be used after initialisation, so we don't really have to do anything for it here.
+        //ctx.resources.jambler.lock(|jambler| {
+        //    jambler.handle_timer_interrupt();
+        //});
+
+
+        rprintln!("Initialisation complete.");
     }
 
     /// Will parse the commands received by uart.
@@ -292,6 +300,7 @@ const APP: () = {
     extern "C" {
         fn SWI0_EGU0();
         fn SWI1_EGU1();
+        fn SWI2_EGU2();
     }
 };
 
@@ -299,6 +308,25 @@ enum RTICCommand {
     JamBLErTask(JamBLErTask),
     BackgroudTask(u8),
     UserInterrupt,
+}
+
+
+fn print_welcome_message(uarte : &mut SerialController) {
+
+    let mut welcome: String<U256> = String::new();
+    welcome
+        .push_str(
+            "\r\n#################\
+                      \r\n#  \\|/          #\
+                      \r\n# --o-- JamBLEr #\
+                      \r\n#  /|\\          #\
+                      \r\n#################\r\n",
+        )
+        .unwrap();
+    uarte.send_string(welcome);
+    welcome = String::new();
+    welcome.push_str("\r\nWelcome my friend!\r\nPress backtick ` to interrupt at any point during execution.\r\nBackspace is supported but will not remove written characters from your screen.\r\nReset button works.\r\nType a command and press enter:\r\n").unwrap();
+    uarte.send_string(welcome);
 }
 
 /// Helper function for parsing a uart string into a command.
