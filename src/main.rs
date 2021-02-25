@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+use crate::jambler::JamBLErReturn;
 use nrf52840_hal as hal; // Embedded_hal implementation for my chip
 use panic_halt as _; // Halts on panic. You can put a breakpoint on `rust_begin_unwind` to catch panics.
 use rtt_target::{rprintln, rtt_init_print}; // for logging to rtt
@@ -67,7 +68,7 @@ const APP: () = {
         let jambler = JamBLEr::new(nrf_jambler, nrf_timer, interval_nrf_timer);
 
         // Spawn the late resources initialiser, so any initialisation for which the resources must be in their final memory place can be done there.
-        ctx.spawn.initialise_late_resources().ok();
+        ctx.spawn.initialise_late_resources(InitialisationSequence::InitialiseJambler).ok();
 
         init::LateResources {
             dummy: 6,
@@ -92,52 +93,64 @@ const APP: () = {
     Tasks with the same priority do not preempt each other.
     */
 
-    /// A handler for radio events
-    #[task(binds = RADIO ,priority = 7, resources = [jambler, dummy])]
+
+
+
+    /*********************************************************/
+    /* // ***          HARDWARE INTERRUPT TASKS          *** */
+    /*********************************************************/
+
+
+
+
+    /// A handler for radio interrupts.
+    /// Is passed completely to jambler.
+    #[task(binds = RADIO ,priority = 7, resources = [jambler], spawn = [RTIC_controller])]
     fn handle_radio(ctx: handle_radio::Context) {
-        //rprintln!("Received interrupt from the radio. Should check its events.");
-        let jambler: &mut JamBLEr<Nrf52840JamBLEr, Nrf52840Timer, Nrf52840IntervalTimer> =
-            ctx.resources.jambler;
+        // Interpret the resource (compiler comfort)
+        let jambler: &mut JamBLEr<Nrf52840JamBLEr, Nrf52840Timer, Nrf52840IntervalTimer> = ctx.resources.jambler;
+
+        // Pass the interrupt to jambler
         let return_instruction = jambler.handle_radio_interrupt();
-        //TODO handle return (make a task for it accepting it if too long)
+        
+        // If the RTIC controller needs to take action, spawn the controller with the given action.
+        let rtic_controller_action = process_jambler_return(return_instruction);
+        if let Some(rtic_controller_action) = rtic_controller_action {
+            ctx.spawn.RTIC_controller(rtic_controller_action).unwrap();
+        }
     }
 
     /// Handles interrupts of the INTERVAL timer used by the jammer
-    #[task(binds = TIMER1 ,priority = 6, resources = [jambler])]
+    #[task(binds = TIMER1 ,priority = 6, resources = [jambler], spawn = [RTIC_controller])]
     fn handle_timer1(mut ctx: handle_timer1::Context) {
-        //rprintln!("Received interrupt from the interval timer.");
+
+
+        let mut return_instruction = None;
+
         // Get lock on the jammer to be able to call its timer interrupt.
         ctx.resources.jambler.lock(|jambler| {
-            let return_instruction = jambler.handle_interval_timer_interrupt();
-            //TODO handle return (make a task for it accepting it if too long)
+            // Pass the interrupt to jambler
+            jambler.handle_interval_timer_interrupt(&mut return_instruction);
+        
+            
         });
+
+        // If the RTIC controller needs to take action, spawn the controller with the given action.
+        let rtic_controller_action = process_jambler_return(return_instruction);
+        if let Some(rtic_controller_action) = rtic_controller_action {
+            ctx.spawn.RTIC_controller(rtic_controller_action).unwrap();
+        }
     }
 
     /// A handler for UART1
     /// UART1 is only available on the nrf52840, sorry not sorry
-    #[task(binds = UARTE1 ,priority = 5, resources = [uarte], spawn = [command_dispatcher])]
+    #[task(binds = UARTE1 ,priority = 5, resources = [uarte], spawn = [cli_command_dispatcher])]
     fn handle_uart(mut ctx: handle_uart::Context) {
         // get the resource
         let uarte: &mut SerialController = ctx.resources.uarte;
 
-        if let Some(mut command) = uarte.handle_interrupt() {
-            // TODO received string dispatch task
-
-            // for now, echo
-            //rprintln!("Received task over uart: {}", &command);
-
-            // TODO spawn call throws error if task not finished and all its static capacity is used (the size of its queue). AKA tasks come too fast
-            ctx.spawn.command_dispatcher(command).unwrap();
-
-            /*
-            task.push_str("\r\n").unwrap();
-            uarte.send_string(task);
-            // after first interrupt with `, start listening for others.
-            uarte.init_receive_string();
-            ctx.resources.jambler.lock(|jambler| {
-                jambler.execute_task(JamBLErTasks::DiscoverAas);
-            });
-            */
+        if let Some(mut cli_command) = uarte.handle_interrupt() {
+            ctx.spawn.cli_command_dispatcher(cli_command).unwrap();
         }
     }
 
@@ -153,6 +166,30 @@ const APP: () = {
     }
 
 
+
+
+    /***********************************************/
+    /* // ***          SOFTWARE TASKS          *** */
+    /***********************************************/
+
+
+
+    /// The central controller.
+    /// 
+    /// Watch out, spawning a task with a higher priority will preempt the current one.
+    /// Other tasks can pass requests to this task.
+    /// 
+    /// The responsibility of this task is to be a central point to avoid code duplication.
+    #[task(priority = 2, resources = [jambler, uarte], spawn = [background_worker, initialise_late_resources])]
+    fn RTIC_controller(mut ctx: RTIC_controller::Context, rtic_controller_action : RTICControllerAction) {
+        match rtic_controller_action {
+            RTICControllerAction::NextInitialisationStep(next_step) => {
+                ctx.spawn.initialise_late_resources(next_step).unwrap();
+            }
+        }
+    }
+
+
     /// Initialise the late resources after they have been copied into their static place.
     /// 
     /// ANY INITIALISING THAT HAS TO BE DONE BY GIVING A POINTER TO A BUFFER IN A LATER RESOURCE HAS TO BE DONE HERE AND NOT IN INIT!
@@ -160,35 +197,51 @@ const APP: () = {
     /// Has same priority as command dispatcher for now. 
     /// Interrupts are already enabled here for the processor.
     #[task(priority = 2, resources = [jambler, uarte])]
-    fn initialise_late_resources(mut ctx: initialise_late_resources::Context) {
-        // Start listening on uart
-        // Only here you can because only from this point on you can give them a pointer to the right buffer
-        ctx.resources.uarte.lock(|uarte| {
-            // Print the welcome message
-            print_welcome_message(uarte);
-            // Start listening. Initially this will only do something when the interrupt is received.
-            uarte.start_listening();
-            // Start listening for a command
-            uarte.init_receive_string();
-        });
-
-        // The radio buffers will only be used after initialisation, so we don't really have to do anything for it here.
-        //ctx.resources.jambler.lock(|jambler| {
-        //    jambler.handle_timer_interrupt();
-        //});
+    fn initialise_late_resources(mut ctx: initialise_late_resources::Context, point_in_init : InitialisationSequence) {
 
 
-        rprintln!("Initialisation complete.");
+        match point_in_init {
+            InitialisationSequence::InitialiseJambler => {
+                // Initialise the jambler first
+                ctx.resources.jambler.lock(|jambler| {
+                    // 
+                    jambler.initialise();
+                });
+
+                ctx.resources.uarte.lock(|uarte| {
+                    // Print the welcome message
+                    print_welcome_message(uarte);
+                });
+            }
+            InitialisationSequence::InitialiseUart => {
+
+                ctx.resources.uarte.lock(|uarte| {
+                    // Start listening. Initially this will only do something when the interrupt is received.
+                    uarte.start_listening();
+                    // Start listening for a command
+                    uarte.init_receive_string();
+                    // print bootup complete message
+                    print_bootup_complete_message(uarte);
+                });
+            }
+        }
     }
+
+    /*
+    
+                    RTICCommand::NextInitialisationStep(next_step) => {
+                        ctx.spawn.initialise_late_resources(next_step).unwrap();
+                    }
+    */
 
     /// Will parse the commands received by uart.
     /// Separate function because this processing should not be done in an interrupt handler task.
-    #[task(priority = 2, resources = [jambler, uarte], spawn = [background_worker])]
-    fn command_dispatcher(mut ctx: command_dispatcher::Context, command: String<U256>) {
+    #[task(priority = 2, resources = [jambler, uarte], spawn = [background_worker, initialise_late_resources])]
+    fn cli_command_dispatcher(mut ctx: cli_command_dispatcher::Context, command: String<U256>) {
         match parse_command(command) {
-            Some(rtic_command) => {
-                match rtic_command {
-                    RTICCommand::UserInterrupt => {
+            Some(cli_command) => {
+                match cli_command {
+                    CLICommand::UserInterrupt => {
                         // TODO configure what happens on user interrupt
                         ctx.resources.jambler.lock(|jambler| {
                             jambler.execute_task(JamBLErTask::UserInterrupt);
@@ -206,17 +259,21 @@ const APP: () = {
                             dev.init_receive_string();
                         });
                     }
-                    RTICCommand::JamBLErTask(jambler_task) => {
+                    CLICommand::JamBLErTask(jambler_task) => {
                         // propagate jambler command to jambler
                         ctx.resources.jambler.lock(|jambler| {
                             jambler.execute_task(jambler_task);
                         });
                     }
-                    RTICCommand::BackgroudTask(backgound_param) => {
+                    CLICommand::BackgroudTask(backgound_param) => {
                         // Spawn the software task.
 
                         // TODO spawn call throws error if task not finished and all its static capacity is used (the size of its queue)
                         ctx.spawn.background_worker(backgound_param).unwrap();
+                    }
+                    _ => {
+                        // Unexpected command parsed
+                        panic!()
                     }
                 }
             }
@@ -250,49 +307,7 @@ const APP: () = {
         // Maybe make jambler function able to run for x iterations from start position x and return if it found one or multiple or none in this slice.
 
         rprintln!("Background task called with task {}", task);
-        //let software_task::Resources {
-        //    dummy,
-        //} = ctx.resources;
-        /*
-        let mut dummy_copy : u8 = 0;
-        // radio has access to dummy as well and this is lower prio: lock needed
-        ctx.resources.dummy.lock(|dummy| {
-            // data can only be modified within this critical section (closure)
-            dummy_copy = *dummy;
-        });
-
-        rprintln!("Hello world from the software task!");
-        if task == 3 {
-            rprintln!("We received a {} from the caller as well!", task);
-        }
-
-        if dummy_copy == 6 as u8 {
-            rprintln!("We also have access to the shared state of dummy: {}.", dummy_copy);
-        }
-
-
-        ctx.resources.uarte.lock(|uarte| {
-            // data can only be modified within this critical section (closure)
-            let dev : &mut SerialController = uarte;
-            let mut welcome : String<U256> = String::new();
-            /*
-            welcome.push_str("\r\n#################\
-                              \r\n#  \\|/          #\
-                              \r\n# --o-- JamBLEr #\
-                              \r\n#  /|\\          #\
-                              \r\n#################\r\n").unwrap();
-            welcome.push_str("Welcome my friend!\r\nPress backtick ` to interrupt at any point during execution.\r\nBackspace is supported but will not remove written characters from your screen.\r\nType a command and press enter:\r\n").unwrap();
-            dev.send_string(welcome);
-            welcome = String::new();
-            */
-            welcome.push_str("\r\nThis build will echo you commands after sending a first interrupt.\r\nSome unknown bug causes the first character you send to not be received, so send a dummy one as well first.\r\n").unwrap();
-            dev.send_string(welcome);
-            welcome = String::new();
-            welcome.push_str("However, I think it is a problem with minicom not sending raw information\r\nRight now when you press enter it sends linefeed instead of new line\r\nThe first received character is always \\0, which might be another minicom thing maybe?\r\n").unwrap();
-            dev.send_string(welcome);
-            rprintln!("Sent welcome string from software task.");
-        });
-        */
+        
     }
 
     // The unused interrupt used for triggering software tasks.
@@ -301,14 +316,72 @@ const APP: () = {
         fn SWI0_EGU0();
         fn SWI1_EGU1();
         fn SWI2_EGU2();
+        fn SWI3_EGU3();
     }
 };
 
-enum RTICCommand {
+
+
+
+
+/***********************************************************************/
+/* // ***          RTIC CONTROL AND DEFINITIONS FUNCTIONS          *** */
+/***********************************************************************/
+
+
+
+/// To keep track of the initialisation sequence
+/// The sequence should be done in the same order as defined here
+#[derive(Debug)]
+enum InitialisationSequence {
+    InitialiseJambler,
+    InitialiseUart,
+}
+
+
+
+/// An enum for letting any task send a message to the controller for changing things.
+#[derive(Debug)]
+enum RTICControllerAction {
+    NextInitialisationStep(InitialisationSequence),
+}
+
+
+
+
+
+
+/// Process jambler return values
+#[inline]
+fn process_jambler_return(jambler_return : Option<JamBLErReturn>) -> Option<RTICControllerAction> {
+    if let Some(jr) = jambler_return {
+        match jr {
+            // If jambler reports his initialisation complete, move on to initialising uart
+            JamBLErReturn::InitialisationComplete => {
+                return Some(RTICControllerAction::NextInitialisationStep(InitialisationSequence::InitialiseUart));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+
+
+
+/**********************************************************************/
+/* // ***          UART PROCESSING AND UTILITY FUNCTIONS          *** */
+/**********************************************************************/
+
+// RTICCommand
+#[derive(Debug)]
+enum CLICommand {
     JamBLErTask(JamBLErTask),
     BackgroudTask(u8),
     UserInterrupt,
 }
+
+
 
 
 fn print_welcome_message(uarte : &mut SerialController) {
@@ -325,7 +398,14 @@ fn print_welcome_message(uarte : &mut SerialController) {
         .unwrap();
     uarte.send_string(welcome);
     welcome = String::new();
-    welcome.push_str("\r\nWelcome my friend!\r\nPress backtick ` to interrupt at any point during execution.\r\nBackspace is supported but will not remove written characters from your screen.\r\nReset button works.\r\nType a command and press enter:\r\n").unwrap();
+    welcome.push_str("\r\nWelcome my friend!\r\nPress backtick ` to interrupt at any point during execution.\r\nBackspace is supported but will not remove written characters from your screen.\r\n").unwrap();
+    uarte.send_string(welcome);
+}
+
+fn print_bootup_complete_message(uarte : &mut SerialController) {
+
+    let mut welcome: String<U256> = String::new();
+    welcome.push_str("\r\nInitialisation done.\r\nType a command and press enter:\r\n").unwrap();
     uarte.send_string(welcome);
 }
 
@@ -333,17 +413,17 @@ fn print_welcome_message(uarte : &mut SerialController) {
 /// Returns Some if the command had a valid syntax.
 /// The command parameters might still be invalid though.
 #[inline]
-fn parse_command(command: String<U256>) -> Option<RTICCommand> {
+fn parse_command(command: String<U256>) -> Option<CLICommand> {
     if let Some(rtic_command) = get_split(command.as_str(), ' ', 0) {
         match rtic_command {
-            "INTERRUPT" => Some(RTICCommand::UserInterrupt),
-            "discoveraas" => Some(RTICCommand::JamBLErTask(JamBLErTask::DiscoverAas)),
+            "INTERRUPT" => Some(CLICommand::UserInterrupt),
+            "discoveraas" => Some(CLICommand::JamBLErTask(JamBLErTask::DiscoverAas)),
             "jam" => {
                 if let Some(param_1_aa) = get_split(command.as_str(), ' ', 1) {
                     if let Some(u32_value_aa) = hex_str_to_u32(param_1_aa) {
                         rprintln!("Received jam command for u32 addres {}", u32_value_aa);
                         //TODO change to proper command
-                        Some(RTICCommand::JamBLErTask(JamBLErTask::Jam))
+                        Some(CLICommand::JamBLErTask(JamBLErTask::Jam))
                     } else {
                         // 1st param was not hex value
                         None
@@ -360,7 +440,7 @@ fn parse_command(command: String<U256>) -> Option<RTICCommand> {
                             u32_value_aa
                         );
                         //TODO change to proper command
-                        Some(RTICCommand::BackgroudTask(u32_value_aa as u8))
+                        Some(CLICommand::BackgroudTask(u32_value_aa as u8))
                     } else {
                         // 1st param was not hex value
                         None

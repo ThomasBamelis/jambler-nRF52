@@ -2,6 +2,7 @@
 pub mod discover_aas;
 pub mod idle;
 pub mod harvest_packets;
+pub mod calibrate_interval_timer;
 
 
 /// Jammer states trait
@@ -128,6 +129,10 @@ pub struct DiscoveredAccessAddress {
 /// For returning things the master should knkow
 #[derive(Clone,Debug)]
 pub enum StateMessage {
+    /// Returns the delays of the interval timer
+    /// The integers inside represent the following
+    /// (state_change_to_first_interrupt_delay, periodic_no_change_delay, interval_timer_change_delay)
+    IntervalTimerDelays(i32, i32, i32),
     /// An access address discovered in the discover AA state.
     /// Parameters are in the following order:
     /// 
@@ -292,6 +297,7 @@ pub struct StateStore {
     idle: idle::Idle,
     discover_aas: discover_aas::DiscoverAas,
     harvest_packets: harvest_packets::HarvestPackets,
+    calibrate_interval_timer : calibrate_interval_timer::CalibrateIntervalTimer,
 }
 
 /*
@@ -314,6 +320,7 @@ impl StateStore {
             idle: idle::Idle::new(),
             discover_aas: discover_aas::DiscoverAas::new(),
             harvest_packets: harvest_packets::HarvestPackets::new(),
+            calibrate_interval_timer: calibrate_interval_timer::CalibrateIntervalTimer::new(),
         }
     }
 
@@ -323,6 +330,8 @@ impl StateStore {
 
     /// Transitions state in the proper way, only for valid state transitions.
     /// This also serves as a way for me to protect me from myself and easily catch things I did not intend to happen.
+    /// 
+    /// Calibrate interval timer should always be last
     pub fn state_transition(
         &mut self,
         new_state: JamBLErState,
@@ -354,6 +363,12 @@ impl StateStore {
             },
             JamBLErState::HarvestingPackets => {
                 let state = &mut self.harvest_packets;
+
+                state.is_valid_transition_to(&new_state)?;
+                state.stop(parameters);
+            },
+            JamBLErState::CalibrateIntervalTimer => {
+                let state = &mut self.calibrate_interval_timer;
 
                 state.is_valid_transition_to(&new_state)?;
                 state.stop(parameters);
@@ -390,6 +405,14 @@ impl StateStore {
                 state_return = state.initialise(parameters)?;
                 state.launch(parameters);
             },
+            JamBLErState::CalibrateIntervalTimer => {
+                let state = &mut self.calibrate_interval_timer;
+
+                state.is_valid_transition_from(&self.current_state)?;
+                state.config(parameters)?;
+                state_return = state.initialise(parameters)?;
+                state.launch(parameters);
+            },
         };
 
         self.current_state = new_state;
@@ -419,6 +442,11 @@ impl StateStore {
                 
                 state.update_state(parameters)
             },
+            JamBLErState::CalibrateIntervalTimer => {
+                let state = &mut self.calibrate_interval_timer;
+                
+                state.update_state(parameters)
+            },
         }
     }
 
@@ -444,6 +472,11 @@ impl StateStore {
 
                 state.handle_radio_interrupt(parameters)
             },
+            JamBLErState::CalibrateIntervalTimer => {
+                let state = &mut self.calibrate_interval_timer;
+
+                state.handle_radio_interrupt(parameters)
+            },
         }
     }
 
@@ -466,6 +499,11 @@ impl StateStore {
             },
             JamBLErState::HarvestingPackets => {
                 let state = &mut self.harvest_packets;
+
+                state.handle_interval_timer_interrupt(parameters)
+            },
+            JamBLErState::CalibrateIntervalTimer => {
+                let state = &mut self.calibrate_interval_timer;
 
                 state.handle_interval_timer_interrupt(parameters)
             },

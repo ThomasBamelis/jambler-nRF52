@@ -10,7 +10,7 @@ use heapless::{consts::*, String};
 use state::IntervalTimerRequirements;
 use state::StateConfig;
 use state::StateStore;
-use state::{StateParameters, StateReturn};
+use state::{StateParameters, StateReturn, StateMessage};
 use hardware_traits::*;
 
 use rtt_target::rprintln;
@@ -28,6 +28,15 @@ pub struct JamBLEr<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> {
     jammer_interval_timer: I,
     state_store: StateStore,
     current_task: JamBLErTask,
+    timing_delays : TimingDelays,
+}
+
+/// Holds the delays states suffer due to the framework when working with the interval timer.
+/// Can be used to anticipate delays and recalculate timing requests.
+struct TimingDelays {
+    state_change_delay : i32, 
+    periodic_no_change_delay : i32, 
+    interval_timer_change_delay : i32
 }
 
 /// TODO move to state.rs
@@ -36,6 +45,7 @@ pub enum JamBLErState {
     Idle,
     DiscoveringAAs,
     HarvestingPackets,
+    CalibrateIntervalTimer,
 }
 
 /// Use this to pass parameters, which you can use in the state conf.
@@ -69,6 +79,10 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
             jammer_interval_timer,
             state_store: StateStore::new(),
             current_task: JamBLErTask::Idle,
+            timing_delays : TimingDelays {
+                state_change_delay : 0, 
+                periodic_no_change_delay : 0, 
+                interval_timer_change_delay : 0},
         }
     }
 
@@ -146,6 +160,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
     /// Helper function for setting the interval timer.
     #[inline]
     fn set_interval_timer(&mut self, req: &IntervalTimerRequirements) {
+        // TODO incorporate timing delays in this. For requesting periodics, use a countdown first incorporating the known delay and the state processing delay you measured. 
         rprintln!("Setting interval timer: {:?}", &req);
         match req {
             IntervalTimerRequirements::NoChanges => {}
@@ -193,6 +208,9 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
             parameters
         );
 
+
+        rprintln!("State transition took {} micros.", self.jammer_timer.get_time_micro_seconds() - current_time);
+
         // Check for errors and any timing requirements
         match transition_result {
             Ok(state_return) => {
@@ -226,6 +244,8 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
             .state_store
             .handle_radio_interrupt(parameters);
 
+        
+        rprintln!("Took state {} micros to handle radio interrupt.", self.jammer_timer.get_time_micro_seconds() - current_time);
 
         // process return
         match state_return {
@@ -253,8 +273,10 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
     }
 
     /// Received interval timer interrupt, dispatch it to the state.
+    /// 
+    /// Because this gets called in a closure, we have to send the return via a pointer that will be filled.
     #[inline]
-    pub fn handle_interval_timer_interrupt(&mut self) -> Option<JamBLErReturn> {
+    pub fn handle_interval_timer_interrupt(&mut self, return_to_be_filled: &mut Option<JamBLErReturn>) {
         // Necessary. At least for nrf because event needs to be reset.
         self.jammer_interval_timer.interrupt_handler();
         // Get current time;
@@ -273,7 +295,10 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
             .state_store
             .handle_interval_timer_interrupt(parameters);
 
+        rprintln!("Took state {} micros to handle timer interrupt.", self.jammer_timer.get_time_micro_seconds() - current_time);
+
         // process return
+        let return_filler : Option<JamBLErReturn>;
         match state_return {
             Ok(ok_state_return) => {
                 match ok_state_return {
@@ -284,10 +309,10 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                         }
     
                         // Process the return value.
-                        self.process_state_return_value(ret)
+                        return_filler = self.process_state_return_value(ret);
                     },
                     None => {
-                        None
+                        return_filler = None;
                     }
                 }
             },
@@ -296,6 +321,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                 panic!()
             }
         }
+        *return_to_be_filled = return_filler;
     }
 
     /// Handler for the long term interrupt timer for when it wraps
@@ -306,14 +332,58 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
 
     /// Processes the return from a state, regardless from which interrupt.
     /// The state is telling the controller something here and should act accordingly.
+    /// TODO ask for parameter for the time before and after the time the state processed the passthrough to enable for timer stuff
+    /// TODO move the set interval timer here as well
     #[inline]
     fn process_state_return_value(&mut self, return_type : StateReturn) -> Option<JamBLErReturn> {
-        //TODO
-        // TODO will most likely need a return t
+        
+        let mut jambler_return = JamBLErReturn::NoReturn;
+
+        // TODO match on state messages and do what you have to do
+        // Process any state return messages
         if let Some(m) = return_type.state_message {
-            rprintln!("State message: {:?}",m);
+            match m {
+                StateMessage::IntervalTimerDelays(state_change_delay, periodic_no_change_delay, interval_timer_change_delay) => {
+                    rprintln!("State change delay: {} micros\nPeriodic without change delay: {} micros\nInterval timer change delay {} micros", state_change_delay, periodic_no_change_delay, interval_timer_change_delay);
+
+                    self.timing_delays = TimingDelays {
+                        state_change_delay, 
+                        periodic_no_change_delay, 
+                        interval_timer_change_delay};
+    
+                    // Tell RTIC we are done initialising
+                    jambler_return = JamBLErReturn::InitialisationComplete;
+
+                }
+                _ => {
+                    rprintln!("State message: {:?}",m);
+                }
+            }
         }
-        Some(JamBLErReturn::NoReturn)
+
+        // If a state change request, do its
+        if let Some((new_state, config_option)) =  return_type.state_transition {
+            // If config was None, give the default empty state config
+            self.state_transition(new_state, config_option.unwrap_or(StateConfig::new()))
+        }
+
+        Some(jambler_return)
+    }
+
+    /// Initialise the jambler.
+    /// For now, only calibrate the interval timer.
+    pub fn initialise(&mut self) {
+
+        // The calibration interval in microseconds
+        // Take this as low as you can but still larger than any possible delay
+        // => figure out by trial and error
+        const CALIBRATION_INTERVAL : u32 = 10_000;
+
+        let mut config = StateConfig::new();
+        config.interval = Some(CALIBRATION_INTERVAL);
+
+        // Start with calibration
+        self.state_transition(JamBLErState::CalibrateIntervalTimer, config);
     }
 }
 
@@ -321,6 +391,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
 #[derive(Debug, Clone)]
 pub enum JamBLErReturn {
     OutputString(String<U256>),
+    InitialisationComplete,
     NoReturn,
 }
 

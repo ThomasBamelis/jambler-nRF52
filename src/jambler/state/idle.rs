@@ -74,6 +74,7 @@ impl JammerState for Idle {
         match new_state {
             Idle => Ok(()),
             DiscoveringAAs => Ok(()),
+            CalibrateIntervalTimer => Ok(()),
             JamBLErState::HarvestingPackets => Ok(()),
             _ => Err(StateError::InvalidStateTransition(
                 "Idle to a non-start state.",
