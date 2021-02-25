@@ -4,6 +4,7 @@
 use crate::jambler::JamBLErReturn;
 use nrf52840_hal as hal; // Embedded_hal implementation for my chip
 use panic_halt as _; // Halts on panic. You can put a breakpoint on `rust_begin_unwind` to catch panics.
+// TODO change panic behaviour to turn on led on board, so we can spot it with multiple leds
 use rtt_target::{rprintln, rtt_init_print}; // for logging to rtt
 
 mod jambler;

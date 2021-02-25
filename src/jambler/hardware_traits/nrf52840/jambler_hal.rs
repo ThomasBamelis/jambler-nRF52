@@ -574,6 +574,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
 
         // Reset the end event, otherwise the interrupt will keep on firing
         radio.events_end.reset();
+        rprintln!("First header byte: {:08b}", unsafe { core::ptr::read_volatile(&self.receive_buffer[0]) });
 
         // Get the first header byte
         let first_header_byte = unsafe { core::ptr::read_volatile(&self.receive_buffer[0]) };
@@ -652,6 +653,248 @@ impl JamBLErHal for Nrf52840JamBLEr {
         // TODO dont forget to add these function in the harvest_packets functions
         // TODO adapt the return of this interface function to your needs
 
+    }
+
+    /// Quick version of packet harvest
+    #[inline]
+    fn harvest_packets_quick_config(&mut self, access_address: u32, phy: BlePHY, channel: u8, crc_init : Option<u32>) -> Result<(), JamBLErHalError> {
+        let master_pdu_buffer = &mut self.receive_buffer;
+        let radio = &mut self.radio_peripheral;
+
+        assert_eq!(radio.state.read().state().is_disabled(), true);
+
+        // Select reception on 0th of 0-7 possible AAs to listen for
+        radio.rxaddresses.write(|w| w.addr0().enabled());
+        radio.base0.write(|w| unsafe{w.bits(access_address << 8)});
+        radio.prefix0.write(|w| unsafe {w.ap0().bits((access_address >> 24) as u8)} );
+
+        // set packet pointer
+        let ptr = master_pdu_buffer.as_ptr() as u32;
+        radio.packetptr.write(|w| unsafe { w.packetptr().bits(ptr) });
+
+        // Set the frequency to the channel
+        let freq = Nrf52840JamBLEr::channel_to_frequency_register_value(channel);
+        radio.frequency.write(|w| unsafe {  w.frequency().bits(freq)}); 
+
+        // Set crc
+        match crc_init {
+            Some(crc_init) => {
+                radio.crcinit.write(|w| unsafe{w.crcinit().bits(crc_init)});
+            }
+            None => {
+                radio.crcinit.reset();
+            }
+        }
+        radio.crccnf.write(|w| { w.len().three().skipaddr().skip() });
+        radio.crcpoly.write(|w| unsafe {w.crcpoly().bits(0b00000001_00000000_00000110_01011011)});
+
+        // Set datawhitening seed
+        radio.datawhiteiv.write(|w| unsafe{w.datawhiteiv().bits(channel)});
+
+        // pcnf1
+        radio.pcnf1.write(|w| unsafe { w .balen().bits(3).statlen().bits(0).maxlen().bits(255).endian().little().whiteen().set_bit() });
+
+
+        // pcnf0
+        // Always receive a third byte as header
+        // On receive, check if 3-byte header flag is set and read in the crc as you should
+        // S0 will be automatically included in the header
+        radio.pcnf0.write(|w| unsafe{w.lflen().bits(8).s0len().bit(true).s1len().bits(8).crcinc().exclude()});
+
+
+        // PHY dependend
+        // Set the PHY mode and the corresponding preamble and cilen and termlen
+        match phy {
+            BlePHY::Uncoded1M => {
+                radio.mode.write(|w| w.mode().ble_1mbit());
+                radio.pcnf0.modify(|_, w| unsafe{w.plen()._8bit().cilen().bits(0).termlen().bits(0)});
+            },
+            BlePHY::Uncoded2M => {
+                radio.mode.write(|w| w.mode().ble_2mbit());
+                radio.pcnf0.modify(|_, w| unsafe{w.plen()._16bit().cilen().bits(0).termlen().bits(0)});
+            },
+            BlePHY::CodedS2 => {
+                radio.mode.write(|w| w.mode().ble_lr500kbit());
+                radio.pcnf0.modify(|_, w| unsafe{w.plen().long_range().cilen().bits(2).termlen().bits(3)});
+            },
+            BlePHY::CodedS8 => {
+                radio.mode.write(|w| w.mode().ble_lr125kbit());
+                radio.pcnf0.modify(|_, w| unsafe{w.plen().long_range().cilen().bits(2).termlen().bits(3)});
+            }
+        }
+
+        // DIFFERENT HERE
+        // Enable fast ramp up, because we will do this all manually
+        radio.modecnf0.write(|w| w.ru().fast());
+
+
+
+        
+        // Set the shortcuts of the state machine
+        // Listen for one, go to disabled immediately so we can fast ramp up to another phy on slave busy wait
+        // Will capture 1 and shut up, but in busy wait for slave ramp up FAST
+        radio.shorts.write(|w| w
+            .rxready_start().enabled()
+            .end_disable().enabled()
+            .address_rssistart().enabled()
+            .disabled_rssistop().enabled()
+        );
+        
+
+        // Enable interrupts on receiving a packet = the end event
+        // TODO match on address match, this way we go up the whole stack while we are still receiving
+        // This is the access address, because device address has the devmatch interrupt
+        radio.events_address.reset();
+        radio.intenset.write(|w| w.address().set());
+        //rprintln!("quick harvest config done");
+        // TODO needs task_rxen trigger
+        Ok(())
+    }
+
+    /// This has to be done ASAP 
+    /// Radio will be in disabled state
+    /// 
+    /// Will return (PDU, CRC, RSSI) for master, and if appropriate also for slave
+    #[inline]
+    fn harvest_packets_busy_wait_slave_response(&mut self, slave_phy : BlePHY) -> Option<(([u8;258], u32, i8), Option<([u8;258], u32, i8)>)> {
+        let master_pdu_buffer = &mut self.receive_buffer;
+        let mut slave_raw_buffer : [u8;258] = [0;258];
+        let slave_pdu_buffer = &mut slave_raw_buffer;
+        // TODO if interrupt on address match, wait for end    
+        // We matched on the address, wait for address match
+        while !self.radio_peripheral.events_end.read().events_end().bits() {}   
+        self.radio_peripheral.events_address.reset();
+        self.radio_peripheral.intenclr.write(|w| w.address().clear());
+        // TODO RSSI 
+
+        let master_rssi : i8 = - ( (self.radio_peripheral.rssisample.read().bits() as u8) as i8);
+
+        // This will be done while radio goes to disabled state (hopefully)
+        // Set packet pointer
+        self.radio_peripheral.packetptr.write(|w| unsafe { w.packetptr().bits(slave_pdu_buffer.as_ptr() as u32) });
+
+
+        // change PHY (decision point is ramp up I guess, use fast ramp up 40 micros, default is 140 micros is too slow)
+        match slave_phy {
+            BlePHY::Uncoded1M => {
+                self.radio_peripheral.mode.write(|w| w.mode().ble_1mbit());
+                self.radio_peripheral.pcnf0.modify(|_, w| unsafe{w.plen()._8bit().cilen().bits(0).termlen().bits(0)});
+            },
+            BlePHY::Uncoded2M => {
+                self.radio_peripheral.mode.write(|w| w.mode().ble_2mbit());
+                self.radio_peripheral.pcnf0.modify(|_, w| unsafe{w.plen()._16bit().cilen().bits(0).termlen().bits(0)});
+            },
+            BlePHY::CodedS2 => {
+                self.radio_peripheral.mode.write(|w| w.mode().ble_lr500kbit());
+                self.radio_peripheral.pcnf0.modify(|_, w| unsafe{w.plen().long_range().cilen().bits(2).termlen().bits(3)});
+            },
+            BlePHY::CodedS8 => {
+                self.radio_peripheral.mode.write(|w| w.mode().ble_lr125kbit());
+                self.radio_peripheral.pcnf0.modify(|_, w| unsafe{w.plen().long_range().cilen().bits(2).termlen().bits(3)});
+            }
+        }
+
+        // Start listening (wait for disabled to be sure)
+        self.radio_peripheral.events_end.reset();
+        while !self.radio_peripheral.events_disabled.read().events_disabled().bits() {} 
+        self.radio_peripheral.tasks_rxen.write(|w| w.tasks_rxen().set_bit());
+
+        // get master crc 
+        // Get it here because this will be done in the time it takes for the radio to ramp up
+        let first_header_byte = unsafe {core::ptr::read_volatile(&master_pdu_buffer[0])};
+        let master_cp_bit_set = (first_header_byte & 0b0010_0000) != 0;
+        let master_received_crc : u32;
+        if master_cp_bit_set {
+            // 3 byte header
+            master_received_crc = self.radio_peripheral.rxcrc.read().bits();
+        }
+        else {
+            let payload_len = unsafe {core::ptr::read_volatile(&master_pdu_buffer[1])};
+            // Get the crc byte which was interpreted as the last byte of the packet
+            // This is an index (start from 0)
+            let misplaced_crc_byte : u8 = unsafe { core::ptr::read_volatile(&master_pdu_buffer[(1 + payload_len + 1) as usize]) };
+            // Get malformed crc the radio thaught it was due to misalignment
+            let malformed_rxcrc = self.radio_peripheral.rxcrc.read().bits();
+            // Reconstruct the actual crc
+            master_received_crc = (reverse_bits(misplaced_crc_byte) as u32) << 16 | (malformed_rxcrc >> 8);
+        }
+
+        // TODO use this instead of this pseudo wait (add it to jambler hal struct): https://docs.rs/nrf52-hal-common/0.6.1/nrf52_hal_common/delay/struct.Delay.html
+
+        // Busy wait for slave 
+        // NRF has 64 cycles per microseconds
+        let mut busy_waiter : u32 = 0;
+        let microsec_wait_approx : u32 = 4 * (600 / 9)  ;
+        // Waiting for an access address match is only dependend on the phy, but not on the packet length.
+        // If I can match the worst case time coded s8 phy address, I can 
+        while !self.radio_peripheral.events_address.read().events_address().bits() && busy_waiter < microsec_wait_approx  {
+            // Do something to busy wait
+            //for _ in 0..64 {
+            //    busy_waiter += 1;
+            //}
+            //busy_waiter -= 63;
+            busy_waiter += 1;
+        }
+
+
+        let mut slave_received_crc : Option<u32> = None;
+        // If received, get slave crc
+        if self.radio_peripheral.events_address.read().events_address().bits() {
+            // We received the address, wait until the whole packet is in memory
+            while !self.radio_peripheral.events_end.read().events_end().bits() {}  
+
+            let first_header_byte = unsafe {core::ptr::read_volatile(&slave_pdu_buffer[0])};
+            let slave_cp_bit_set = (first_header_byte & 0b0010_0000) != 0;
+            if slave_cp_bit_set {
+                // 3 byte header
+                slave_received_crc = Some(self.radio_peripheral.rxcrc.read().bits());
+            }
+            else {
+                let payload_len = unsafe {core::ptr::read_volatile(&slave_pdu_buffer[1])};
+                // Get the crc byte which was interpreted as the last byte of the packet
+                // This is an index (start from 0)
+                let misplaced_crc_byte : u8 = unsafe { core::ptr::read_volatile(&slave_pdu_buffer[(1 + payload_len + 1) as usize]) };
+                // Get malformed crc the radio thaught it was due to misalignment
+                let malformed_rxcrc = self.radio_peripheral.rxcrc.read().bits();
+                // Reconstruct the actual crc
+                slave_received_crc = Some((reverse_bits(misplaced_crc_byte) as u32) << 16 | (malformed_rxcrc >> 8));
+            }
+
+
+        }
+
+
+        let slave_rssi : i8 = - ( (self.radio_peripheral.rssisample.read().bits() as u8) as i8);
+
+        // Disable radio again, in case no packet was found
+        self.radio_peripheral.tasks_disable.write(|w| w.tasks_disable().set_bit());
+        // Reset end event in case a packet was found
+        self.radio_peripheral.events_end.reset();
+        self.radio_peripheral.events_address.reset();
+        // Disable interrupts as well
+        self.radio_peripheral.intenclr.write(|w| w.address().clear());
+
+        //let master_s0 = unsafe { core::ptr::read_volatile(&master_pdu_buffer[0])};
+        //let master_len = unsafe { core::ptr::read_volatile(&master_pdu_buffer[1])};
+        //let slave_s0 = unsafe { core::ptr::read_volatile(&slave_pdu_buffer[0])};
+        //let slave_len = unsafe { core::ptr::read_volatile(&slave_pdu_buffer[1])};
+        //let slave_unwrap_crc = if let Some(crc) = slave_received_crc {crc} else {0};
+        //rprintln!("Received 2 packets: {}\nMaster S0, len, crc, rssi: {:08b} {} 0x{:06X} {}\nSlave S0, len, crc, rssi: {:08b} {} 0x{:06X} {}", slave_received_crc.is_some(), master_s0, master_len, master_received_crc, master_rssi, slave_s0, slave_len, slave_unwrap_crc, slave_rssi);
+
+        // Copy the master buffer into the thing to return
+        let mut master_raw_buffer : [u8; 258] = [0;258];
+        for i in 0..master_raw_buffer.len() {
+            master_raw_buffer[i] = self.receive_buffer[i];
+        }
+
+        match slave_received_crc {
+            None => {
+                Some(((master_raw_buffer, master_received_crc, master_rssi), None))
+            }
+            Some(slave_crc) => {
+                Some(((master_raw_buffer, master_received_crc, master_rssi), Some((slave_raw_buffer, slave_crc, slave_rssi))))
+            }
+        }
     }
 
 

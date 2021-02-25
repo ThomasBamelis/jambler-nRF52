@@ -73,6 +73,14 @@ pub trait JamBLErHal {
     /// See the comments for that to know what it contains.
     fn handle_harvest_packets_radio_interrupt(&mut self) -> Option<HalHarvestedPacket>;
 
+    fn harvest_packets_quick_config(&mut self, access_address: u32, phy: BlePHY, channel: u8, crc_init : Option<u32>) -> Result<(), JamBLErHalError> ;
+
+    /// Gets called after radio interrupt handler.
+    /// If received a master packet, return some.
+    /// If within busy wait time, second part will be some as well.
+    /// These are supposed to be the crc's of the received packets.
+    /// The slave packets has to be copied to the slave pdu buffer.
+    fn harvest_packets_busy_wait_slave_response(&mut self, slave_phy : BlePHY) -> Option<(([u8;258], u32, i8), Option<([u8;258], u32, i8)>)>;
 
 }
 

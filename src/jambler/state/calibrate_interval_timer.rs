@@ -140,7 +140,14 @@ impl JammerState for CalibrateIntervalTimer {
                 // Calculate how much longer they took compared to the actual given interval
                 // Assume they all took longer than the actual interval
                 let state_change_to_first_interrupt_delay : i32 = (state_change_to_first_interrupt_time - self.interval as u64) as i32;
-                let periodic_no_change_delay : i32 = (periodic_no_change_time - self.interval as u64) as i32;
+                let periodic_no_change_delay : i32 = 
+                    if periodic_no_change_time < self.interval as u64 {
+
+                    - ((self.interval as u64 - periodic_no_change_time ) as i32)
+                    } else {
+
+                        (periodic_no_change_time - self.interval as u64) as i32
+                    };
                 let interval_timer_change_delay : i32 = (interval_timer_change_time - self.interval as u64) as i32;
 
                 // Put it in the return message

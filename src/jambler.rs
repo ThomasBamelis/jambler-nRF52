@@ -1,6 +1,9 @@
 mod state;
 mod util;
 mod hardware_traits;
+mod reversing_connection_parameters;
+
+use reversing_connection_parameters::reverse_calculate_crc_init;
 
 // Re-export hardware implementations for user
 use heapless::Vec;
@@ -126,8 +129,8 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                 // for now, listen on legacy phy, all data channels 
                 // max interval for 100, advertising AA
                 config.access_address = Some(0xAF9ABB1B);
-                config.phy = Some(BlePHY::CodedS8);
-                config.slave_phy = Some(BlePHY::CodedS8);
+                config.phy = Some(BlePHY::Uncoded2M);
+                config.slave_phy = Some(BlePHY::Uncoded2M);
                 config.interval = Some(4_000_000);
                 let mut cc : Vec<u8, U64> = Vec::new();
                 for i in 24..=24 {
@@ -135,7 +138,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                 }
                 config.channel_chain = Some(cc);
 
-                config.number_of_intervals = Some(1);
+                config.number_of_intervals = Some(5);
 
                 // no crc init
                 config.crc_init = Some(0x555555);
@@ -354,6 +357,30 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                     // Tell RTIC we are done initialising
                     jambler_return = JamBLErReturn::InitialisationComplete;
 
+                }
+                // TODO delete
+                StateMessage::HarvestedSubevent(mut harvested, _, wrap) => {
+                    let master_pdu = &mut harvested.packet;
+                    let master_crc = harvested.packet_crc;
+                    let mut master_len = (master_pdu[1] as u16) + 2;
+                    if master_pdu[0] & 0b0010_0000 != 0 {
+                        master_len += 1;
+                    }
+                    let master_crc_init = reverse_calculate_crc_init(master_crc, master_pdu, master_len);
+                    if let Some((slave_pdu, slave_crc, slave_rssi)) = harvested.response {
+                        let mut slave_len = (slave_pdu[1] as u16) + 2;
+                        if slave_pdu[0] & 0b0010_0000 != 0 {
+                            slave_len += 1;
+                        }
+                        let slave_crc_init = reverse_calculate_crc_init(slave_crc, &slave_pdu, slave_len);
+
+
+                        rprintln!("Received full connection subevent\nMaster S0, len, crc, crc_init, rssi: {:08b} {} 0x{:06X} 0x{:06X} {}\nSlave S0, len, crc, crc_init, rssi: {:08b} {} 0x{:06X} 0x{:06X} {}\n", master_pdu[0], master_pdu[1], master_crc, master_crc_init, harvested.packet_rssi, slave_pdu[0], slave_pdu[1], slave_crc, slave_crc_init, slave_rssi);
+
+                    }
+                    else {
+                        rprintln!("Received only 1 pdu from connection subevent\nPacket S0, len, crc, crc_init, rssi: {:08b} {} 0x{:06X} 0x{:06X} {}\n", master_pdu[0], master_pdu[1], master_crc, master_crc_init, harvested.packet_rssi);
+                    }
                 }
                 _ => {
                     rprintln!("State message: {:?}",m);
