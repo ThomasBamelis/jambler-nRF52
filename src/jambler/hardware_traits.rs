@@ -1,8 +1,11 @@
-
 pub mod nrf52840;
 
-use super:: BlePHY;
-
+use super::BlePHY;
+use heapless::{
+    pool,
+    pool::singleton::{Box, Pool},
+};
+use crate::jambler::{PDU_SIZE, PDU};
 
 #[derive(Debug, Clone)]
 pub enum JamBLErHalError {
@@ -10,18 +13,12 @@ pub enum JamBLErHalError {
     InvalidChannel(u8),
 }
 
-
-
 /// The trait that a specific chip has to implement to be used by the jammer.
-/// 
+///
 /// Reset can be called at any point.
-/// 
+///
 /// ANY FUNCTION HERE SHOULD BE INLINED IN IMPLEMENTATION!
 pub trait JamBLErHal {
-    //TODO delete
-    fn set_access_address(&mut self, aa: u32) -> Result<(), JamBLErHalError>;
-
-
     /// Start sending with the current configuration.
     /// Radio should be configure before this.
     /// Should be called shortly after config and fire up very fast, so any speedup achieved by making the radio more ready but consume more power should already running.
@@ -48,60 +45,75 @@ pub trait JamBLErHal {
     /// Should not change anything to the configuration and does not need to be a low power mode.
     fn idle(&mut self);
 
-
     /* // *** Discovering access addresses *** */
 
     /// Should get the radio ready for listening on the given phy and channel
     /// This config is special because many chips require hacks and cannot sniff every possible packet normally by listening.
-    fn config_discover_access_addresses(&mut self, phy : BlePHY, channel : u8) -> Result<(), JamBLErHalError>;
+    fn config_discover_access_addresses(&mut self, phy: BlePHY, channel: u8);
 
     /// Reads the access address from the receive buffer of you chip.
     /// Might be hacky for certain chips.
-    fn read_discovered_access_address(&mut self)-> Option<(u32, i8)>;
+    fn read_discovered_access_address(&mut self) -> Option<(u32, i8)>;
 
     /* // *** Harvesting packets *** */
 
-    /// Should configure the radio to receive all packets sent by the given 
+    /// Should configure the radio to receive all packets sent by the given
     /// access address on the given phy and channel.
     /// Should enable crc checking (but not ignore failed checks) if the given crc_init is Some. Otherwise none.
-    fn config_harvest_packets(&mut self, access_address: u32, phy: BlePHY, channel: u8, crc_init : Option<u32>) -> Result<(), JamBLErHalError>;
+    fn config_harvest_packets(
+        &mut self,
+        access_address: u32,
+        phy: BlePHY,
+        channel: u8,
+        crc_init: Option<u32>,
+    );
 
-    /// Returns Some if a packet was received on the channel, phy and access address configured using the last config_harvest_packets. 
-    /// Regardless of whether the crc check failed/succeeded. 
-    /// 
+    /// Returns Some if a packet was received on the channel, phy and access address configured using the last config_harvest_packets.
+    /// Regardless of whether the crc check failed/succeeded.
+    ///
     /// In the Some case, Some contains a HalHarvestedPacket.
     /// See the comments for that to know what it contains.
     fn handle_harvest_packets_radio_interrupt(&mut self) -> Option<HalHarvestedPacket>;
 
-    fn harvest_packets_quick_config(&mut self, access_address: u32, phy: BlePHY, channel: u8, crc_init : Option<u32>) -> Result<(), JamBLErHalError> ;
+    fn harvest_packets_quick_config(
+        &mut self,
+        access_address: u32,
+        phy: BlePHY,
+        channel: u8,
+        crc_init: Option<u32>,
+        master_pdu_buffer : &mut Box<PDU>,
+    );
 
     /// Gets called after radio interrupt handler.
     /// If received a master packet, return some.
     /// If within busy wait time, second part will be some as well.
     /// These are supposed to be the crc's of the received packets.
     /// The slave packets has to be copied to the slave pdu buffer.
-    fn harvest_packets_busy_wait_slave_response(&mut self, slave_phy : BlePHY) -> Option<(([u8;258], u32, i8), Option<([u8;258], u32, i8)>)>;
-
+    fn harvest_packets_busy_wait_slave_response(
+        &mut self,
+        slave_phy: BlePHY,
+        master_pdu_buffer : &mut Box<PDU>,
+        slave_pdu_buffer : &mut Box<PDU>
+    ) -> Option<((u32, i8), Option<(u32, i8)>)>;
 }
 
 /// Return information when requested to harvest packets.
-#[derive(Debug)] 
+#[derive(Debug)]
 pub struct HalHarvestedPacket {
     /// Some if crc has been enabled by providing a Some(crc_init) value in the latest config_harvest_packets. True if the crc check was successfull, false if it wasn't.
-    pub crc_ok : bool,
-    /// Some if instructed to reverse calculate the crc init and able to do so. 
+    pub crc_ok: bool,
+    /// Some if instructed to reverse calculate the crc init and able to do so.
     /// Then it contains the reversed crc for this packet as it has been received (might have been received with errors).
-    pub crc_init : u32,
+    pub crc_init: u32,
     /// The rssi, why not
-    pub rssi : i8,
-    pub first_header_byte : u8,
-    pub second_header_byte : u8,
+    pub rssi: i8,
+    pub first_header_byte: u8,
+    pub second_header_byte: u8,
 }
-
 
 /// A long term timer.
 /// Should be accurate up until a microseconds and last for more than the lifetime of a human (= u64 wraparound counter).
-/// TODO callback for correcting for a number of microseconds (BLE slave anchor point synchronisation, clock synchronisation over I2C). 
+/// TODO callback for correcting for a number of microseconds (BLE slave anchor point synchronisation, clock synchronisation over I2C).
 pub trait JamBLErTimer {
     /// Starts the timer
     fn start(&mut self);
@@ -140,7 +152,7 @@ pub trait JamBLErIntervalTimer {
     fn config(&mut self, interval: u32, periodic: bool) -> bool;
 
     /// Starts the timer
-    /// 
+    ///
     fn start(&mut self);
 
     /// Resets the timer.

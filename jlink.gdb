@@ -8,8 +8,8 @@ set history size 1000
 file target/thumbv7em-none-eabihf/debug/rust-jammer
 #file target/thumbv7em-none-eabihf/release/rust-jammer
 # changed this to connect to raspberry pi which is connected to the JLink
-target remote localhost:2331
-#target remote raspberrypi.local:2331
+#target remote localhost:2331
+target remote raspberrypi.local:2331
 
 monitor reset
 
@@ -43,4 +43,4 @@ load
 
 # start the process but immediately halt the processor
 #stepi
-continue
+#continue

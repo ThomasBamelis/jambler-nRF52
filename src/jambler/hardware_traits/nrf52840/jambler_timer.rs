@@ -1,5 +1,5 @@
-use nrf52840_hal as hal; // Embedded_hal implementation for my chip
 use hal::pac::TIMER2;
+use nrf52840_hal as hal; // Embedded_hal implementation for my chip
 
 use super::super::JamBLErTimer;
 use core::sync::atomic::{compiler_fence, Ordering::SeqCst};
@@ -36,8 +36,7 @@ impl Nrf52840Timer {
 }
 
 impl JamBLErTimer for Nrf52840Timer {
-    
-    #[inline]
+    #[inline(always)]
     fn start(&mut self) {
         // *** reset ***
 
@@ -76,7 +75,7 @@ impl JamBLErTimer for Nrf52840Timer {
 
     /// Gets the duration since the start of the count in micro seconds.
     /// Micro should be accurate enough for any BLE event.
-    #[inline]
+    #[inline(always)]
     fn get_time_micro_seconds(&mut self) -> u64 {
         compiler_fence(SeqCst);
         self.timer_peripheral.tasks_capture[0].write(|w| w.tasks_capture().set_bit());
@@ -98,7 +97,7 @@ impl JamBLErTimer for Nrf52840Timer {
     }
 
     /// Resets the timer. The timer is stopped after this.
-    #[inline]
+    #[inline(always)]
     fn reset(&mut self) {
         // Variable to make the code a bit less verbose.
         let timer = &mut self.timer_peripheral;
@@ -153,7 +152,7 @@ impl JamBLErTimer for Nrf52840Timer {
     }
 
     /// Will be called when an interrupt for the timer occurs.
-    #[inline]
+    #[inline(always)]
     fn interrupt_handler(&mut self) {
         compiler_fence(SeqCst);
         let cc1_event: bool = self.timer_peripheral.events_compare[1].read().bits() != 0;

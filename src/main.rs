@@ -1,19 +1,61 @@
 #![no_std]
 #![no_main]
+// TODO delete, warnings are a pain in the ass when trying to work quickly
+#![allow(warnings)]
 
+use crate::jambler::ConnectionSamplePacket;
+use crate::jambler::ConnectionSample;
 use crate::jambler::JamBLErReturn;
 use nrf52840_hal as hal; // Embedded_hal implementation for my chip
-use panic_halt as _; // Halts on panic. You can put a breakpoint on `rust_begin_unwind` to catch panics.
-// TODO change panic behaviour to turn on led on board, so we can spot it with multiple leds
+                         //use panic_halt as _; // Halts on panic. You can put a breakpoint on `rust_begin_unwind` to catch panics.
+                         // TODO change panic behaviour to turn on led on board, so we can spot it with multiple leds
 use rtt_target::{rprintln, rtt_init_print}; // for logging to rtt
 
 mod jambler;
-use jambler::nrf52840::{Nrf52840IntervalTimer, Nrf52840JamBLEr, Nrf52840Timer};
-use jambler::{JamBLEr, JamBLErTask};
+use crate::jambler::nrf52840::{Nrf52840IntervalTimer, Nrf52840JamBLEr, Nrf52840Timer};
+use crate::jambler::{JamBLEr, JamBLErTask};
 
 mod serial;
+use crate::serial::SerialController;
 use heapless::{consts::*, String};
-use serial::SerialController;
+use heapless::{
+    pool,
+    pool::singleton::{Box, Pool},
+};
+// Our pseudo PDU heap
+use crate::jambler::{initialise_pdu_heap, PDU, PDU_SIZE};
+const JAMBLER_RETURN_CAPACITY : u8 = 5;
+
+use crate::jambler::reverse_calculate_crc_init;
+
+// for the
+
+// My own panick handler
+// Rewrite this to start blinking a red LED on the board and to print the error message via RTT
+use core::panic::PanicInfo;
+use core::sync::atomic::{self, Ordering};
+
+/// My own panic handler.
+/// Wrote my own so I could print the error message on any medium I want.
+/// This makes it so I do not have to work with results anywhere which slow down the process too much, this is a real time application.
+///
+/// I can also use it to make an LED blink, which will be very useful to show an error occurred when multiple devices are connected and I cannot hook them all up to JLink.
+///
+/// Inline(never) necessary to be able to set a breakpoint on rust_begin_unwind
+#[inline(never)]
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    // Prints the panic over RTT
+    // TODO remove all unnecesary RTT communication
+    // TODO RTT is buffered, so if the buffer is not filled with anything I will be able to attack JLink and read out the error after the fact!
+    rprintln!("{}", info);
+    loop {
+        atomic::compiler_fence(Ordering::SeqCst);
+        // Makes a debugger stop here.
+        cortex_m::asm::bkpt();
+        // TODO blink something
+    }
+}
 
 // This defines my rtic application, passing the nrf52840 hal to it.
 // It also specifies we want access to the device specific peripherals (via ctx.devices = hal::peripherals)
@@ -42,6 +84,36 @@ const APP: () = {
         rtt_init_print!();
         rprintln!("Booting up.");
 
+        /* Showcasing on how to let nrf use PDU pools which give you boxes which let you pass around a BOX to tasks! Without having a heap! */
+        // Reserve memory for the PDUs,
+        static mut PDU_MEMORY_POOL: [u8; PDU_SIZE * 11] = [0; PDU_SIZE * 11];
+        let PDU_POOL_MAX = unsafe { initialise_pdu_heap(&mut PDU_MEMORY_POOL) };
+
+        /*
+        // Will be 1 less than 10 due to alignment
+        rprintln!("PDU pool real size = {}", PDU_POOL_MAX);
+
+        // Allocate a PDU and initialise it (you can leave it uninitialised)
+        // Will return None if memory full
+        let mut boxed_pdu = PDU::alloc().unwrap().init([69; 258]);
+        // Use it like a normal box (as if we had it right here)
+        boxed_pdu[3] = boxed_pdu[1] + boxed_pdu[2];
+        let changed = boxed_pdu[3];
+
+        // give p as u32 to packetptr of nrf
+        let p = boxed_pdu.as_ptr();
+        let box_ref = &mut boxed_pdu;
+        let p_as_u32 = box_ref.as_ptr() as u32;
+        assert_eq!(p_as_u32, p as u32);
+
+        // Showcase with raw read that it is the calculation of above
+        let grabbed = unsafe {core::ptr::read_volatile(p.add(3))};
+
+        // Have to free it manually (I think?)
+        drop(boxed_pdu);
+        // cannot use boxed_pdu after this point because drop moved it (destroyed it)
+        */
+
         // setup uart
         // Configure uart according to adafruit feather board schematic
         // I had to hardcode the ports in the serial controller.
@@ -65,11 +137,13 @@ const APP: () = {
         let nrf_timer = Nrf52840Timer::new(timer_per);
         let interval_timer_per: hal::pac::TIMER1 = ctx.device.TIMER1;
         let interval_nrf_timer = Nrf52840IntervalTimer::new(interval_timer_per);
-        
+
         let jambler = JamBLEr::new(nrf_jambler, nrf_timer, interval_nrf_timer);
 
         // Spawn the late resources initialiser, so any initialisation for which the resources must be in their final memory place can be done there.
-        ctx.spawn.initialise_late_resources(InitialisationSequence::InitialiseJambler).ok();
+        ctx.spawn
+            .initialise_late_resources(InitialisationSequence::InitialiseJambler)
+            .ok();
 
         init::LateResources {
             dummy: 6,
@@ -94,52 +168,47 @@ const APP: () = {
     Tasks with the same priority do not preempt each other.
     */
 
-
-
-
     /*********************************************************/
     /* // ***          HARDWARE INTERRUPT TASKS          *** */
     /*********************************************************/
 
+    /*
+    Priority explanation (0-7, 3 bit interrupt priority on arm cortex m4f)
+    7 - jambler state interrupts (radio and interval timer (TODO unite, they only lock radio and do something, so they are sequential => share prio)
+    6 - Inter-board communication: I2C and SPI handlers (never active at the same stage)
+    5 - Remaining Interrupt: any remaining interrupts: long term timer wrapping, uart, etc..
 
-
+     */
 
     /// A handler for radio interrupts.
     /// Is passed completely to jambler.
-    #[task(binds = RADIO ,priority = 7, resources = [jambler], spawn = [RTIC_controller])]
+    #[task(binds = RADIO ,priority = 7, resources = [jambler], spawn = [handle_jambler_return])]
     fn handle_radio(ctx: handle_radio::Context) {
         // Interpret the resource (compiler comfort)
-        let jambler: &mut JamBLEr<Nrf52840JamBLEr, Nrf52840Timer, Nrf52840IntervalTimer> = ctx.resources.jambler;
+        let jambler: &mut JamBLEr<Nrf52840JamBLEr, Nrf52840Timer, Nrf52840IntervalTimer> =
+            ctx.resources.jambler;
 
-        // Pass the interrupt to jambler
-        let return_instruction = jambler.handle_radio_interrupt();
-        
-        // If the RTIC controller needs to take action, spawn the controller with the given action.
-        let rtic_controller_action = process_jambler_return(return_instruction);
-        if let Some(rtic_controller_action) = rtic_controller_action {
-            ctx.spawn.RTIC_controller(rtic_controller_action).unwrap();
+
+        // pass the interrupt and spawn the jambler return handler task with it immediately if there is a return value
+        if let Some(jambler_return) = jambler.handle_radio_interrupt() {
+            ctx.spawn.handle_jambler_return(jambler_return).expect("JamBLEr handle return flooded. Panic because memory leak if this goes ok().");
         }
     }
 
     /// Handles interrupts of the INTERVAL timer used by the jammer
-    #[task(binds = TIMER1 ,priority = 6, resources = [jambler], spawn = [RTIC_controller])]
+    #[task(binds = TIMER1 ,priority = 6, resources = [jambler], spawn = [handle_jambler_return])]
     fn handle_timer1(mut ctx: handle_timer1::Context) {
-
-
         let mut return_instruction = None;
 
         // Get lock on the jammer to be able to call its timer interrupt.
         ctx.resources.jambler.lock(|jambler| {
             // Pass the interrupt to jambler
             jambler.handle_interval_timer_interrupt(&mut return_instruction);
-        
-            
         });
 
-        // If the RTIC controller needs to take action, spawn the controller with the given action.
-        let rtic_controller_action = process_jambler_return(return_instruction);
-        if let Some(rtic_controller_action) = rtic_controller_action {
-            ctx.spawn.RTIC_controller(rtic_controller_action).unwrap();
+        // pass the interrupt and spawn the jambler return handler task with it immediately if there is a return value
+        if let Some(jambler_return) = return_instruction {
+            ctx.spawn.handle_jambler_return(jambler_return).expect("JamBLEr handle return flooded. Panic because memory leak if this goes ok().");
         }
     }
 
@@ -157,7 +226,7 @@ const APP: () = {
 
     /// Handles interrupts of the timer used by the jammer.
     /// This is the timer used for long term timing, basically time keeping the system.
-    #[task(binds = TIMER2 ,priority = 4, resources = [jambler])]
+    #[task(binds = TIMER2 ,priority = 5, resources = [jambler])]
     fn handle_timer2(mut ctx: handle_timer2::Context) {
         // Get lock on the jammer to be able to call its timer interrupt.
         //rprintln!("Received interrupt from the long term timer.");
@@ -166,23 +235,149 @@ const APP: () = {
         });
     }
 
-
-
-
     /***********************************************/
     /* // ***          SOFTWARE TASKS          *** */
     /***********************************************/
 
+    /*
+    Priority explanation:
 
+    4 - Jambler interupt return handler: to handle a return value from jambler
+    3 - I2C and SPI handlers: processing communication between
+    2 - Everything that is "control related", the big guidelines of the execution
+    1 - Heavy background processing
+     */
+
+    /// Takes heavy processing of jambler returns.
+    /// For example:
+    ///     - reverse calculating crc of freshly received packets
+    ///     - Constructing output string for uart
+    ///     -
+    /// TODO: communicate via heapless::pool for packets
+    /// TODO: make pool!(JamblerReturn : [JamBLErReturn ; capacity]);
+    /// then grow in init
+    /// 
+    /// WILL BE DIFFERENT FOR SLAVES AND MASTERS, DO THIS ONE IN HERE
+    #[task(priority = 4, capacity = 5, resources = [jambler], spawn = [RTIC_controller])]
+    fn handle_jambler_return(
+        mut ctx: handle_jambler_return::Context,
+        jambler_return: JamBLErReturn,
+    ) {
+        //rprintln!("Handling jambler return value:{}", &jambler_return);
+        match jambler_return {
+            JamBLErReturn::InitialisationComplete => {
+                // Go to the next initialisation step, uart in this case for now
+                ctx.spawn.RTIC_controller(RTICControllerAction::NextInitialisationStep(
+                    InitialisationSequence::InitialiseUart,
+                ));
+            }
+            JamBLErReturn::HarvestedSubEvent(harvested_subevent, completed_channel_chain) => {
+                // turn the harvested subevent into a small and easily digested connection sample (reversing the crc is way too heavy to do in interrupt handler)
+
+                /*
+                rprintln!("Return handler START packet: {:?} | {}", harvested_subevent.packet.pdu.as_ptr(), harvested_subevent.packet.pdu[0]);
+                if let Some(ref r) = harvested_subevent.response {
+                    rprintln!("Response: {:?} | {}", r.pdu.as_ptr(), r.pdu[0]);
+                }
+                */
+
+                let connection_sample : ConnectionSample;
+                // Calculate the crc init values
+                match &harvested_subevent.response {
+                    None => {
+                        // Process partial subevent
+                        // check if 2 or 3 byte header, need to know for pdu length which we need for reversing the crc
+                        let packet_pdu_length : u16;
+                        if harvested_subevent.packet.pdu[0] & 0b0010_0000 != 0 {
+                            packet_pdu_length = 3 + harvested_subevent.packet.pdu[1] as u16;
+                        }
+                        else {
+                            packet_pdu_length = 2 + harvested_subevent.packet.pdu[1] as u16;
+                        }
+
+                        connection_sample = ConnectionSample {
+                            channel : harvested_subevent.channel,
+                            time : harvested_subevent.time,
+                            packet : ConnectionSamplePacket {
+                                first_header_byte : harvested_subevent.packet.pdu[0],
+                                phy : harvested_subevent.packet.phy,
+                                reversed_crc_init : reverse_calculate_crc_init(harvested_subevent.packet.crc, &harvested_subevent.packet.pdu[..], packet_pdu_length)
+                            },
+                            response : None,
+                        }
+                    }
+                    Some(response) => {
+                        // process FULL harvested subevent
+
+                        let master_pdu_length : u16;
+                        if harvested_subevent.packet.pdu[0] & 0b0010_0000 != 0 {
+                            master_pdu_length = 3 + harvested_subevent.packet.pdu[1] as u16;
+                        }
+                        else {
+                            master_pdu_length = 2 + harvested_subevent.packet.pdu[1] as u16;
+                        }
+
+                        let slave_pdu_length : u16;
+                        if response.pdu[0] & 0b0010_0000 != 0 {
+                            slave_pdu_length = 3 + response.pdu[1] as u16;
+                        }
+                        else {
+                            slave_pdu_length = 2 + response.pdu[1] as u16;
+                        }
+
+                        connection_sample = ConnectionSample {
+                            channel : harvested_subevent.channel,
+                            time : harvested_subevent.time,
+                            packet : ConnectionSamplePacket {
+                                first_header_byte : harvested_subevent.packet.pdu[0],
+                                phy : harvested_subevent.packet.phy,
+                                reversed_crc_init : reverse_calculate_crc_init(harvested_subevent.packet.crc, &harvested_subevent.packet.pdu[..], master_pdu_length)
+                            },
+                            response : Some(ConnectionSamplePacket {
+                                first_header_byte : response.pdu[0],
+                                phy : response.phy,
+                                reversed_crc_init : reverse_calculate_crc_init(response.crc, &response.pdu[..], slave_pdu_length)
+                            }),
+                        }
+                    }
+                }
+
+                /*
+                rprintln!("Return handler END packet: {:?} | {}", harvested_subevent.packet.pdu.as_ptr(), harvested_subevent.packet.pdu[0]);
+                if let Some(ref r) = harvested_subevent.response {
+                    rprintln!("Response: {:?} | {}", r.pdu.as_ptr(), r.pdu[0]);
+                }
+                */
+
+                // Make sure to release the PDUs from the pdu heap
+                drop(harvested_subevent.packet);
+                if let Some(response) = harvested_subevent.response {
+                    drop(response)
+                }
+                // TODO get connection_sample to the background process for reversing the connection parameters
+                rprintln!("{}", connection_sample)
+            },
+            JamBLErReturn::HarvestedUnusedChannel(channel, completed_channel_chain) => {
+                // TODO add the channel to some u8 array available to the background process
+                rprintln!("{}", JamBLErReturn::HarvestedUnusedChannel(channel, completed_channel_chain));
+            },
+            JamBLErReturn::NoReturn => {
+
+            }
+        }
+    }
 
     /// The central controller.
-    /// 
+    ///
     /// Watch out, spawning a task with a higher priority will preempt the current one.
     /// Other tasks can pass requests to this task.
-    /// 
+    ///
     /// The responsibility of this task is to be a central point to avoid code duplication.
     #[task(priority = 2, resources = [jambler, uarte], spawn = [background_worker, initialise_late_resources])]
-    fn RTIC_controller(mut ctx: RTIC_controller::Context, rtic_controller_action : RTICControllerAction) {
+    fn RTIC_controller(
+        mut ctx: RTIC_controller::Context,
+        rtic_controller_action: RTICControllerAction,
+    ) {
         match rtic_controller_action {
             RTICControllerAction::NextInitialisationStep(next_step) => {
                 ctx.spawn.initialise_late_resources(next_step).unwrap();
@@ -190,22 +385,22 @@ const APP: () = {
         }
     }
 
-
     /// Initialise the late resources after they have been copied into their static place.
-    /// 
+    ///
     /// ANY INITIALISING THAT HAS TO BE DONE BY GIVING A POINTER TO A BUFFER IN A LATER RESOURCE HAS TO BE DONE HERE AND NOT IN INIT!
-    /// 
-    /// Has same priority as command dispatcher for now. 
+    ///
+    /// Has same priority as command dispatcher for now.
     /// Interrupts are already enabled here for the processor.
     #[task(priority = 2, resources = [jambler, uarte])]
-    fn initialise_late_resources(mut ctx: initialise_late_resources::Context, point_in_init : InitialisationSequence) {
-
-
+    fn initialise_late_resources(
+        mut ctx: initialise_late_resources::Context,
+        point_in_init: InitialisationSequence,
+    ) {
         match point_in_init {
             InitialisationSequence::InitialiseJambler => {
                 // Initialise the jambler first
                 ctx.resources.jambler.lock(|jambler| {
-                    // 
+                    //
                     jambler.initialise();
                 });
 
@@ -215,7 +410,6 @@ const APP: () = {
                 });
             }
             InitialisationSequence::InitialiseUart => {
-
                 ctx.resources.uarte.lock(|uarte| {
                     // Start listening. Initially this will only do something when the interrupt is received.
                     uarte.start_listening();
@@ -229,7 +423,7 @@ const APP: () = {
     }
 
     /*
-    
+
                     RTICCommand::NextInitialisationStep(next_step) => {
                         ctx.spawn.initialise_late_resources(next_step).unwrap();
                     }
@@ -308,7 +502,6 @@ const APP: () = {
         // Maybe make jambler function able to run for x iterations from start position x and return if it found one or multiple or none in this slice.
 
         rprintln!("Background task called with task {}", task);
-        
     }
 
     // The unused interrupt used for triggering software tasks.
@@ -321,15 +514,9 @@ const APP: () = {
     }
 };
 
-
-
-
-
 /***********************************************************************/
 /* // ***          RTIC CONTROL AND DEFINITIONS FUNCTIONS          *** */
 /***********************************************************************/
-
-
 
 /// To keep track of the initialisation sequence
 /// The sequence should be done in the same order as defined here
@@ -339,36 +526,28 @@ enum InitialisationSequence {
     InitialiseUart,
 }
 
-
-
 /// An enum for letting any task send a message to the controller for changing things.
 #[derive(Debug)]
 enum RTICControllerAction {
     NextInitialisationStep(InitialisationSequence),
 }
 
-
-
-
-
-
 /// Process jambler return values
 #[inline]
-fn process_jambler_return(jambler_return : Option<JamBLErReturn>) -> Option<RTICControllerAction> {
+fn process_jambler_return(jambler_return: Option<JamBLErReturn>) -> Option<RTICControllerAction> {
     if let Some(jr) = jambler_return {
         match jr {
             // If jambler reports his initialisation complete, move on to initialising uart
             JamBLErReturn::InitialisationComplete => {
-                return Some(RTICControllerAction::NextInitialisationStep(InitialisationSequence::InitialiseUart));
+                return Some(RTICControllerAction::NextInitialisationStep(
+                    InitialisationSequence::InitialiseUart,
+                ));
             }
             _ => {}
         }
     }
     None
 }
-
-
-
 
 /**********************************************************************/
 /* // ***          UART PROCESSING AND UTILITY FUNCTIONS          *** */
@@ -382,11 +561,7 @@ enum CLICommand {
     UserInterrupt,
 }
 
-
-
-
-fn print_welcome_message(uarte : &mut SerialController) {
-
+fn print_welcome_message(uarte: &mut SerialController) {
     let mut welcome: String<U256> = String::new();
     welcome
         .push_str(
@@ -403,10 +578,11 @@ fn print_welcome_message(uarte : &mut SerialController) {
     uarte.send_string(welcome);
 }
 
-fn print_bootup_complete_message(uarte : &mut SerialController) {
-
+fn print_bootup_complete_message(uarte: &mut SerialController) {
     let mut welcome: String<U256> = String::new();
-    welcome.push_str("\r\nInitialisation done.\r\nType a command and press enter:\r\n").unwrap();
+    welcome
+        .push_str("\r\nInitialisation done.\r\nType a command and press enter:\r\n")
+        .unwrap();
     uarte.send_string(welcome);
 }
 
