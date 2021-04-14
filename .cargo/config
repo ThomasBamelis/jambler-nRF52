@@ -27,6 +27,9 @@ rustflags = [
   # "-C", "linker=arm-none-eabi-gcc",
   # "-C", "link-arg=-Wl,-Tlink.x",
   # "-C", "link-arg=-nostartfiles",
+
+  # ADDED MYSELF, PROVIDES OPTMISATIONS FOR THE TARGET m4f chip
+  "-C", "target-cpu=cortex-m4",
 ]
 
 [build]

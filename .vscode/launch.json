@@ -7,10 +7,14 @@
     "version": "0.2.0",
     "configurations": [
         {
-            /* Configuration for the nrf52840 */
+            /* 
+                MASTER DEBUG
+                Configuration for the nrf52840 
+                JLinkRemoteServer -SelectEmuBySN 801019317 -port 23456
+            */
             "type": "cortex-debug",
             "request": "launch",
-            "name": "NRF52840 JLink",
+            "name": "Master Debug",
             "servertype": "jlink",
             "cwd": "${workspaceRoot}",
             "preLaunchTask": "Cargo Build (debug)",
@@ -20,16 +24,20 @@
             // "executable": "./target/thumbv7em-none-eabihf/debug/examples/itm",
             "device": "nrf52",
             "interface": "swd",
-            "ipAddress": "192.168.0.123",
+            "ipAddress": "192.168.0.123:23456",
             "serialNumber": null,
             "armToolchainPath": "/home/thomas/.arm_toolchain/gcc-arm-none-eabi-10-2020-q4-major/bin/"
 
         },
         {
-            /* Configuration for the nrf52840, RELEASE BUILD */
+            /* 
+                MASTER RELEASE
+                Configuration for the nrf52840, RELEASE BUILD 
+                JLinkRemoteServer -SelectEmuBySN 801019317 -port 23456
+            */
             "type": "cortex-debug",
             "request": "launch",
-            "name": "NRF52840 JLink release",
+            "name": "Master Release",
             "servertype": "jlink",
             "cwd": "${workspaceRoot}",
             "preLaunchTask": "Cargo Build (release)",
@@ -39,7 +47,53 @@
             // "executable": "./target/thumbv7em-none-eabihf/debug/examples/itm",
             "device": "nrf52",
             "interface": "swd",
-            "ipAddress": "192.168.0.123",
+            "ipAddress": "192.168.0.123:23456",
+            "serialNumber": null,
+            "armToolchainPath": "/home/thomas/.arm_toolchain/gcc-arm-none-eabi-10-2020-q4-major/bin/"
+
+        },
+        {
+            /* 
+                SLAVE DEBUG
+                Configuration for the nrf52840 
+                JLinkRemoteServer -SelectEmuBySN 801024748 -port 34567
+            */
+            "type": "cortex-debug",
+            "request": "launch",
+            "name": "Slave Debug",
+            "servertype": "jlink",
+            "cwd": "${workspaceRoot}",
+            "preLaunchTask": "Cargo Build (debug)",
+            "runToMain": true,
+            "executable": "./target/thumbv7em-none-eabihf/debug/rust-jammer",
+            /* Run `cargo build --example itm` and uncomment this line to run itm example */
+            // "executable": "./target/thumbv7em-none-eabihf/debug/examples/itm",
+            "device": "nrf52",
+            "interface": "swd",
+            "ipAddress": "192.168.0.123:34567",
+            "serialNumber": null,
+            "armToolchainPath": "/home/thomas/.arm_toolchain/gcc-arm-none-eabi-10-2020-q4-major/bin/"
+
+        },
+        {
+            /* 
+                SLAVE RELEASE
+                Configuration for the nrf52840 
+                JLinkRemoteServer -SelectEmuBySN 801024748 -port 34567
+            */
+            "type": "cortex-debug",
+            "request": "launch",
+            "name": "Slave Release",
+            "servertype": "jlink",
+            "cwd": "${workspaceRoot}",
+            "preLaunchTask": "Cargo Build (release)",
+            "runToMain": true,
+            "executable": "./target/thumbv7em-none-eabihf/release/rust-jammer",
+            /* Run `cargo build --example itm` and uncomment this line to run itm example */
+            // "executable": "./target/thumbv7em-none-eabihf/debug/examples/itm",
+            "device": "nrf52",
+            "interface": "swd",
+            "ipAddress": "192.168.0.123:34567",
             "serialNumber": null,
             "armToolchainPath": "/home/thomas/.arm_toolchain/gcc-arm-none-eabi-10-2020-q4-major/bin/"
 

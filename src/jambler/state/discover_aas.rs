@@ -78,7 +78,7 @@ impl JammerState for DiscoverAas {
         // Check if all channels are legal
         while self.current_channel < self.channel_chain.len() {
             let channel: u8 = self.channel_chain[self.current_channel];
-            if channel < 0 || channel > 36 {
+            if channel > 36 {
                 panic!("Illegal channel in channel chain for discovering AAs");
             }
             self.current_channel += 1;

@@ -9,12 +9,11 @@ use core::sync::atomic::{compiler_fence, Ordering::SeqCst};
 
 use rtt_target::rprintln;
 
-
+use crate::jambler::{PDU, PDU_SIZE};
 use heapless::{
     pool,
     pool::singleton::{Box, Pool},
 };
-use crate::jambler::{PDU_SIZE, PDU};
 
 /// A struct for altering the radio module of the nrf52840.
 /// This struct will be held in the JamBLEr struct which is supposed to be static and in ram.
@@ -731,7 +730,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
         phy: BlePHY,
         channel: u8,
         crc_init: Option<u32>,
-        master_pdu_buffer : &mut Box<PDU>
+        master_pdu_buffer: &mut Box<PDU>,
     ) {
         let radio = &mut self.radio_peripheral;
 
@@ -751,7 +750,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
         radio
             .packetptr
             .write(|w| unsafe { w.packetptr().bits(ptr) });
-            //rprintln!("Packetpointer set in harvest config: 0x{:08X}", ptr);
+        //rprintln!("Packetpointer set in harvest config: 0x{:08X}", ptr);
 
         // Set the frequency to the channel
         let freq = Nrf52840JamBLEr::channel_to_frequency_register_value(channel);
@@ -873,10 +872,9 @@ impl JamBLErHal for Nrf52840JamBLEr {
     fn harvest_packets_busy_wait_slave_response(
         &mut self,
         slave_phy: BlePHY,
-        master_pdu_buffer : &mut Box<PDU>,
-        slave_pdu_buffer : &mut Box<PDU>
+        master_pdu_buffer: &mut Box<PDU>,
+        slave_pdu_buffer: &mut Box<PDU>,
     ) -> Option<((u32, i8), Option<(u32, i8)>)> {
-        
         // TODO if interrupt on address match, wait for end
         // We matched on the address, wait for address match
         while !self.radio_peripheral.events_end.read().events_end().bits() {}
@@ -991,11 +989,10 @@ impl JamBLErHal for Nrf52840JamBLEr {
         */
 
         // Busy wait for the maximum amount of microseconds between end event and access address match of response for THIS CHIP (done by trial and error, just needs an upper bound)
-        const MICROSECONDS_TO_WAIT : u32 = 500;
-        const CYCLES_TO_WAIT : u32 = MICROSECONDS_TO_WAIT * 64 ; // 64 MHz = 64 cycles per microsecond
-        // Busy waits for **at least** n instruction cycles. nop also available if you want but lets keep it simple
+        const MICROSECONDS_TO_WAIT: u32 = 500;
+        const CYCLES_TO_WAIT: u32 = MICROSECONDS_TO_WAIT * 64; // 64 MHz = 64 cycles per microsecond
+                                                               // Busy waits for **at least** n instruction cycles. nop also available if you want but lets keep it simple
         cortex_m::asm::delay(CYCLES_TO_WAIT);
-
 
         // Check if we received an access address match within this delay
         let mut slave_received_crc: Option<u32> = None;
@@ -1050,7 +1047,6 @@ impl JamBLErHal for Nrf52840JamBLEr {
         //let slave_len = unsafe { core::ptr::read_volatile(&slave_pdu_buffer[1])};
         //let slave_unwrap_crc = if let Some(crc) = slave_received_crc {crc} else {0};
         //rprintln!("Received 2 packets: {}\nMaster S0, len, crc, rssi: {:08b} {} 0x{:06X} {}\nSlave S0, len, crc, rssi: {:08b} {} 0x{:06X} {}", slave_received_crc.is_some(), master_s0, master_len, master_received_crc, master_rssi, slave_s0, slave_len, slave_unwrap_crc, slave_rssi);
-
 
         match slave_received_crc {
             None => Some(((master_received_crc, master_rssi), None)),

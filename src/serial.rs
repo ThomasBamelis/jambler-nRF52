@@ -74,14 +74,14 @@ impl SerialController {
         // then set the connect to connected
         // This has to be done before enabling the module.
         device.psel.rxd.write(|w| {
-            unsafe { w.bits(24 as u32) };
+            unsafe { w.bits(13 as u32) };
             w.connect().connected()
         });
 
         // see 6.33.2, txd has to be high
         pins_ctrl.txd.set_high().unwrap();
         device.psel.txd.write(|w| {
-            unsafe { w.bits(25 as u32) };
+            unsafe { w.bits(15 as u32) };
             w.connect().connected()
         });
 

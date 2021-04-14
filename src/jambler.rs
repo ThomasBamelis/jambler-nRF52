@@ -1,11 +1,10 @@
+pub mod deduce_connection_parameters;
 mod hardware_traits;
-mod reversing_connection_parameters;
 mod state;
 mod util;
 
 use crate::jambler::state::harvest_packets::HarvestedSubEvent;
 use crate::jambler::util::TimeStamp;
-pub use reversing_connection_parameters::reverse_calculate_crc_init;
 
 // Re-export hardware implementations for user
 pub use hardware_traits::nrf52840;
@@ -429,16 +428,20 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                 }
                 // Received a harvested subevent, pass a command for processing its
                 StateMessage::HarvestedSubevent(harvested, wrap) => {
-
                     jambler_return = Some(JamBLErReturn::HarvestedSubEvent(harvested, wrap))
-                },
+                }
                 StateMessage::UnusedChannel(channel, wrap) => {
                     jambler_return = Some(JamBLErReturn::HarvestedUnusedChannel(channel, wrap))
                 }
-                _ => {
-                    // TODO delete
-                    // This as of right now is for debugging purposes
-                    rprintln!("State message: {:?}", m);
+                StateMessage::ResetDeducingConnectionParameters(new_access_address, mp, sp) => {
+                    jambler_return = Some(JamBLErReturn::ResetDeducingConnectionParameters(
+                        new_access_address,
+                        mp,
+                        sp,
+                    ))
+                }
+                StateMessage::AccessAddress(discovered_aa) => {
+                    // TODO this state message will change in the future, when it is implemented and it will need the phy of the master and the phy of the slave (it might however be only on phy that is returned here as the chips who are working together will each do a phy on a channel and you will have to combine that knowledge)
                 }
             }
 
@@ -472,15 +475,9 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
     }
 }
 
-
-
-
-
 /***************************************************/
 /* // ***          EXPORTED STRUCTS            *** */
 /***************************************************/
-
-
 
 /// Jambler should never give an "output string", the slave/master code should parse and build an output string itself if it needs it.
 /// TODO make a heap for these, they get big...
@@ -492,9 +489,9 @@ pub enum JamBLErReturn {
     HarvestedSubEvent(HarvestedSubEvent, bool),
     /// Indicates jambler timed out while listening on a channel
     HarvestedUnusedChannel(u8, bool),
+    ResetDeducingConnectionParameters(u32, BlePHY, BlePHY),
     NoReturn,
 }
-
 
 impl core::fmt::Display for JamBLErReturn {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -504,21 +501,32 @@ impl core::fmt::Display for JamBLErReturn {
             }
             JamBLErReturn::HarvestedSubEvent(harvested_subevent, completed_channel_chain) => {
                 if *completed_channel_chain {
-                    write!(f, "Harvested subevent, completed all assigned channels!{}", harvested_subevent)
-
-                }
-                else {
+                    write!(
+                        f,
+                        "Harvested subevent, completed all assigned channels!{}",
+                        harvested_subevent
+                    )
+                } else {
                     write!(f, "Harvested subevent{}", harvested_subevent)
                 }
             }
             JamBLErReturn::HarvestedUnusedChannel(channel, completed_channel_chain) => {
                 if *completed_channel_chain {
-                    write!(f, "Found channel {} is unused, completed all assigned channels!", channel)
-
-                }
-                else {
+                    write!(
+                        f,
+                        "Found channel {} is unused, completed all assigned channels!",
+                        channel
+                    )
+                } else {
                     write!(f, "Found channel {} is unused", channel)
                 }
+            }
+            JamBLErReturn::ResetDeducingConnectionParameters(new_access_address, mp, sp) => {
+                write!(
+                    f,
+                    "Reset deducing connection parameters with new access address 0x{:08X} and phys {} and {}",
+                    new_access_address, mp, sp
+                )
             }
             JamBLErReturn::NoReturn => {
                 write!(f, "No return value")
@@ -533,7 +541,6 @@ impl core::fmt::Debug for JamBLErReturn {
     }
 }
 
-
 #[derive(Clone, Copy, PartialEq)]
 pub enum BlePHY {
     Uncoded1M,
@@ -541,7 +548,6 @@ pub enum BlePHY {
     CodedS2,
     CodedS8,
 }
-
 
 impl core::fmt::Display for BlePHY {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -568,26 +574,32 @@ impl core::fmt::Debug for BlePHY {
     }
 }
 
-
 /// A struct holding all important information a subevent can hold for reversing the parameters of a connection.
 pub struct ConnectionSample {
-    pub channel : u8,
-    pub time : u64,
-    pub packet : ConnectionSamplePacket,
-    pub response : Option<ConnectionSamplePacket>,
+    pub channel: u8,
+    pub time: u64,
+    pub time_on_channel: u32,
+    pub packet: ConnectionSamplePacket,
+    pub response: Option<ConnectionSamplePacket>,
 }
-
 
 /// Implementing display for it because it is very necessary for debugging
 impl core::fmt::Display for ConnectionSample {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match &self.response {
             Some(response) => {
-                write!(f, "\nSubevent channel {} at {}\nMaster{}\nSlave{}\n", self.channel, self.time, self.packet, response)
-
-            },
+                write!(
+                    f,
+                    "\nSubevent channel {} at {}\nMaster{}\nSlave{}\n",
+                    self.channel, self.time, self.packet, response
+                )
+            }
             None => {
-                write!(f, "\nPartial subevent channel {} at {}\nPacket\n{}\n", self.channel, self.time, self.packet)
+                write!(
+                    f,
+                    "\nPartial subevent channel {} at {}\nPacket\n{}\n",
+                    self.channel, self.time, self.packet
+                )
             }
         }
     }
@@ -602,19 +614,23 @@ impl core::fmt::Debug for ConnectionSample {
 /// Holds all information a packet belonging to a subevent can hold
 pub struct ConnectionSamplePacket {
     /// The first header byte, holding important flags for helping determine if this was an anchorpoint or not
-    pub first_header_byte : u8,
-    /// The calculated reverse crc init we got on this packet. 
+    pub first_header_byte: u8,
+    /// The calculated reverse crc init we got on this packet.
     /// Remember, when we settle on a crc_init, this will be the true crc init if it was received correctly.
-    pub reversed_crc_init : u32,
+    pub reversed_crc_init: u32,
     /// The phy the packet was caught on (remember, in BLE5 master and slave can send on different PHYs)
-    pub phy : BlePHY,
+    pub phy: BlePHY,
+    /// The rssi at which the packet has been captured
+    pub rssi: i8,
 }
-
-
 
 impl core::fmt::Display for ConnectionSamplePacket {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "\n|{:08b} ... | CRC INIT: 0x{:06X}, PHY {:?}\n", self.first_header_byte, self.reversed_crc_init, self.phy)
+        write!(
+            f,
+            "\n|{:08b} ... | CRC INIT: 0x{:06X}, PHY {:?}, RSSI {}\n",
+            self.first_header_byte, self.reversed_crc_init, self.phy, self.rssi
+        )
     }
 }
 

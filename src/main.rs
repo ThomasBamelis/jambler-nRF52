@@ -1,10 +1,11 @@
 #![no_std]
 #![no_main]
 // TODO delete, warnings are a pain in the ass when trying to work quickly
-#![allow(warnings)]
+//#![allow(warnings)]
 
-use crate::jambler::ConnectionSamplePacket;
+use crate::jambler::BlePHY;
 use crate::jambler::ConnectionSample;
+use crate::jambler::ConnectionSamplePacket;
 use crate::jambler::JamBLErReturn;
 use nrf52840_hal as hal; // Embedded_hal implementation for my chip
                          //use panic_halt as _; // Halts on panic. You can put a breakpoint on `rust_begin_unwind` to catch panics.
@@ -15,8 +16,11 @@ mod jambler;
 use crate::jambler::nrf52840::{Nrf52840IntervalTimer, Nrf52840JamBLEr, Nrf52840Timer};
 use crate::jambler::{JamBLEr, JamBLErTask};
 
+use crate::jambler::deduce_connection_parameters::{reverse_calculate_crc_init, DeduceConnectionParametersControl, DeductionState, CounterInterval};
+
 mod serial;
 use crate::serial::SerialController;
+use heapless::spsc::Queue;
 use heapless::{consts::*, String};
 use heapless::{
     pool,
@@ -24,9 +28,8 @@ use heapless::{
 };
 // Our pseudo PDU heap
 use crate::jambler::{initialise_pdu_heap, PDU, PDU_SIZE};
-const JAMBLER_RETURN_CAPACITY : u8 = 5;
+const JAMBLER_RETURN_CAPACITY: u8 = 5;
 
-use crate::jambler::reverse_calculate_crc_init;
 
 // for the
 
@@ -63,8 +66,11 @@ fn panic(info: &PanicInfo) -> ! {
 const APP: () = {
     struct Resources {
         /// This struct holds all resources shared between tasks.
-        /// As of now, I fully specify each path to better understand it all.
-        dummy: u8,
+
+        /// Is used to control the deduce connection parameters task.
+        /// Works a bit like controlling peripherals.
+        /// This struct contains the "control registers" for the task.
+        dcp_control: DeduceConnectionParametersControl,
         uarte: SerialController,
         jambler: JamBLEr<Nrf52840JamBLEr, Nrf52840Timer, Nrf52840IntervalTimer>,
     }
@@ -120,10 +126,10 @@ const APP: () = {
         let p0 = hal::gpio::p0::Parts::new(ctx.device.P0);
         let uart_pins = hal::uarte::Pins {
             txd: p0
-                .p0_25
+                .p0_15
                 .into_push_pull_output(hal::gpio::Level::High)
                 .degrade(),
-            rxd: p0.p0_24.into_floating_input().degrade(),
+            rxd: p0.p0_13.into_floating_input().degrade(),
             cts: None,
             rts: None,
         };
@@ -146,7 +152,7 @@ const APP: () = {
             .ok();
 
         init::LateResources {
-            dummy: 6,
+            dcp_control: DeduceConnectionParametersControl::new(),
             uarte,
             jambler,
         }
@@ -188,10 +194,11 @@ const APP: () = {
         let jambler: &mut JamBLEr<Nrf52840JamBLEr, Nrf52840Timer, Nrf52840IntervalTimer> =
             ctx.resources.jambler;
 
-
         // pass the interrupt and spawn the jambler return handler task with it immediately if there is a return value
         if let Some(jambler_return) = jambler.handle_radio_interrupt() {
-            ctx.spawn.handle_jambler_return(jambler_return).expect("JamBLEr handle return flooded. Panic because memory leak if this goes ok().");
+            ctx.spawn.handle_jambler_return(jambler_return).expect(
+                "JamBLEr handle return flooded. Panic because memory leak if this goes ok().",
+            );
         }
     }
 
@@ -208,7 +215,9 @@ const APP: () = {
 
         // pass the interrupt and spawn the jambler return handler task with it immediately if there is a return value
         if let Some(jambler_return) = return_instruction {
-            ctx.spawn.handle_jambler_return(jambler_return).expect("JamBLEr handle return flooded. Panic because memory leak if this goes ok().");
+            ctx.spawn.handle_jambler_return(jambler_return).expect(
+                "JamBLEr handle return flooded. Panic because memory leak if this goes ok().",
+            );
         }
     }
 
@@ -256,9 +265,9 @@ const APP: () = {
     /// TODO: communicate via heapless::pool for packets
     /// TODO: make pool!(JamblerReturn : [JamBLErReturn ; capacity]);
     /// then grow in init
-    /// 
+    ///
     /// WILL BE DIFFERENT FOR SLAVES AND MASTERS, DO THIS ONE IN HERE
-    #[task(priority = 4, capacity = 5, resources = [jambler], spawn = [RTIC_controller])]
+    #[task(priority = 4, capacity = 5, resources = [jambler, dcp_control], spawn = [RTIC_controller, deduce_connection_parameters])]
     fn handle_jambler_return(
         mut ctx: handle_jambler_return::Context,
         jambler_return: JamBLErReturn,
@@ -267,9 +276,10 @@ const APP: () = {
         match jambler_return {
             JamBLErReturn::InitialisationComplete => {
                 // Go to the next initialisation step, uart in this case for now
-                ctx.spawn.RTIC_controller(RTICControllerAction::NextInitialisationStep(
-                    InitialisationSequence::InitialiseUart,
-                ));
+                ctx.spawn
+                    .RTIC_controller(RTICControllerAction::NextInitialisationStep(
+                        InitialisationSequence::InitialiseUart,
+                    ));
             }
             JamBLErReturn::HarvestedSubEvent(harvested_subevent, completed_channel_chain) => {
                 // turn the harvested subevent into a small and easily digested connection sample (reversing the crc is way too heavy to do in interrupt handler)
@@ -281,62 +291,76 @@ const APP: () = {
                 }
                 */
 
-                let connection_sample : ConnectionSample;
+                let connection_sample: ConnectionSample;
                 // Calculate the crc init values
                 match &harvested_subevent.response {
                     None => {
                         // Process partial subevent
                         // check if 2 or 3 byte header, need to know for pdu length which we need for reversing the crc
-                        let packet_pdu_length : u16;
+                        let packet_pdu_length: u16;
                         if harvested_subevent.packet.pdu[0] & 0b0010_0000 != 0 {
                             packet_pdu_length = 3 + harvested_subevent.packet.pdu[1] as u16;
-                        }
-                        else {
+                        } else {
                             packet_pdu_length = 2 + harvested_subevent.packet.pdu[1] as u16;
                         }
 
                         connection_sample = ConnectionSample {
-                            channel : harvested_subevent.channel,
-                            time : harvested_subevent.time,
-                            packet : ConnectionSamplePacket {
-                                first_header_byte : harvested_subevent.packet.pdu[0],
-                                phy : harvested_subevent.packet.phy,
-                                reversed_crc_init : reverse_calculate_crc_init(harvested_subevent.packet.crc, &harvested_subevent.packet.pdu[..], packet_pdu_length)
+                            channel: harvested_subevent.channel,
+                            time: harvested_subevent.time,
+                            time_on_channel: harvested_subevent.time_on_the_channel,
+                            packet: ConnectionSamplePacket {
+                                first_header_byte: harvested_subevent.packet.pdu[0],
+                                phy: harvested_subevent.packet.phy,
+                                reversed_crc_init: reverse_calculate_crc_init(
+                                    harvested_subevent.packet.crc,
+                                    &harvested_subevent.packet.pdu[..],
+                                    packet_pdu_length,
+                                ),
+                                rssi: harvested_subevent.packet.rssi,
                             },
-                            response : None,
+                            response: None,
                         }
                     }
                     Some(response) => {
                         // process FULL harvested subevent
 
-                        let master_pdu_length : u16;
+                        let master_pdu_length: u16;
                         if harvested_subevent.packet.pdu[0] & 0b0010_0000 != 0 {
                             master_pdu_length = 3 + harvested_subevent.packet.pdu[1] as u16;
-                        }
-                        else {
+                        } else {
                             master_pdu_length = 2 + harvested_subevent.packet.pdu[1] as u16;
                         }
 
-                        let slave_pdu_length : u16;
+                        let slave_pdu_length: u16;
                         if response.pdu[0] & 0b0010_0000 != 0 {
                             slave_pdu_length = 3 + response.pdu[1] as u16;
-                        }
-                        else {
+                        } else {
                             slave_pdu_length = 2 + response.pdu[1] as u16;
                         }
 
                         connection_sample = ConnectionSample {
-                            channel : harvested_subevent.channel,
-                            time : harvested_subevent.time,
-                            packet : ConnectionSamplePacket {
-                                first_header_byte : harvested_subevent.packet.pdu[0],
-                                phy : harvested_subevent.packet.phy,
-                                reversed_crc_init : reverse_calculate_crc_init(harvested_subevent.packet.crc, &harvested_subevent.packet.pdu[..], master_pdu_length)
+                            channel: harvested_subevent.channel,
+                            time: harvested_subevent.time,
+                            time_on_channel: harvested_subevent.time_on_the_channel,
+                            packet: ConnectionSamplePacket {
+                                first_header_byte: harvested_subevent.packet.pdu[0],
+                                phy: harvested_subevent.packet.phy,
+                                reversed_crc_init: reverse_calculate_crc_init(
+                                    harvested_subevent.packet.crc,
+                                    &harvested_subevent.packet.pdu[..],
+                                    master_pdu_length,
+                                ),
+                                rssi: harvested_subevent.packet.rssi,
                             },
-                            response : Some(ConnectionSamplePacket {
-                                first_header_byte : response.pdu[0],
-                                phy : response.phy,
-                                reversed_crc_init : reverse_calculate_crc_init(response.crc, &response.pdu[..], slave_pdu_length)
+                            response: Some(ConnectionSamplePacket {
+                                first_header_byte: response.pdu[0],
+                                phy: response.phy,
+                                reversed_crc_init: reverse_calculate_crc_init(
+                                    response.crc,
+                                    &response.pdu[..],
+                                    slave_pdu_length,
+                                ),
+                                rssi: response.rssi,
                             }),
                         }
                     }
@@ -354,16 +378,62 @@ const APP: () = {
                 if let Some(response) = harvested_subevent.response {
                     drop(response)
                 }
-                // TODO get connection_sample to the background process for reversing the connection parameters
-                rprintln!("{}", connection_sample)
-            },
-            JamBLErReturn::HarvestedUnusedChannel(channel, completed_channel_chain) => {
-                // TODO add the channel to some u8 array available to the background process
-                rprintln!("{}", JamBLErReturn::HarvestedUnusedChannel(channel, completed_channel_chain));
-            },
-            JamBLErReturn::NoReturn => {
 
+                // Push to the queue for the connection parameter deducer
+                let queue: &mut Queue<ConnectionSample, U32> =
+                    &mut ctx.resources.dcp_control.connection_sample_queue;
+
+                match queue.enqueue(connection_sample) {
+                    Err(e) => {
+                        rprintln!("WARNING: connection sample queue flooding, dropping sample.")
+                    }
+                    _ => {
+                        // Everything okay
+                    }
+                }
+
+                // If the deducer is not yet running, start it
+                ctx.spawn.deduce_connection_parameters().ok();
+
+                // TODO do something if you completed channel chain?
             }
+            JamBLErReturn::HarvestedUnusedChannel(channel, completed_channel_chain) => {
+                // Push to the queue for the connection parameter deducer
+                let queue: &mut Queue<u8, U32> =
+                    &mut ctx.resources.dcp_control.unused_channel_queue;
+
+                match queue.enqueue(channel) {
+                    Err(e) => {
+                        rprintln!("WARNING: unused channel sample queue flooding, dropping sample.")
+                    }
+                    _ => {
+                        // Everything okay
+                    }
+                }
+
+                // If the deducer is not yet running, start it
+                ctx.spawn.deduce_connection_parameters().ok();
+
+                // TODO do something if you completed channel chain?
+            }
+            JamBLErReturn::ResetDeducingConnectionParameters(
+                new_access_address,
+                master_phy,
+                slave_phy,
+            ) => {
+                // Signal the task it has to reset
+                ctx.resources.dcp_control.reset = true;
+                ctx.resources.dcp_control.access_address = new_access_address;
+                ctx.resources.dcp_control.master_phy = master_phy;
+                ctx.resources.dcp_control.slave_phy = slave_phy;
+
+                // If the deducer is not yet running, start it.
+                // It has to be started to read out that it has to reset
+                // Has only capacity 1, so ok() will let it run if not yet running or discard the capicity full error if it
+                // is running already.
+                ctx.spawn.deduce_connection_parameters().ok();
+            }
+            JamBLErReturn::NoReturn => {}
         }
     }
 
@@ -373,7 +443,7 @@ const APP: () = {
     /// Other tasks can pass requests to this task.
     ///
     /// The responsibility of this task is to be a central point to avoid code duplication.
-    #[task(priority = 2, resources = [jambler, uarte], spawn = [background_worker, initialise_late_resources])]
+    #[task(priority = 2, resources = [jambler, uarte], spawn = [ initialise_late_resources])]
     fn RTIC_controller(
         mut ctx: RTIC_controller::Context,
         rtic_controller_action: RTICControllerAction,
@@ -381,8 +451,19 @@ const APP: () = {
         match rtic_controller_action {
             RTICControllerAction::NextInitialisationStep(next_step) => {
                 ctx.spawn.initialise_late_resources(next_step).unwrap();
-            }
+            } // TODO a user interrupt
+              /*
+              jambler.handle_user_interrupt();
+              // reset the backgroudn worker
+              *ctx.resources.reset_deduce_connection_parameters = true;
+                  // If the deducer is not yet running, start it.
+                  // It has to be started to read out that it has to reset
+                  if !*ctx.resources.deduce_connection_parameters_is_running {
+                      ctx.spawn.deduce_connection_parameters().ok();
+                  }
+              */
         }
+        // TODO reset jambler, the deduce conn parameters task, send interrupt to slaves
     }
 
     /// Initialise the late resources after they have been copied into their static place.
@@ -431,7 +512,7 @@ const APP: () = {
 
     /// Will parse the commands received by uart.
     /// Separate function because this processing should not be done in an interrupt handler task.
-    #[task(priority = 2, resources = [jambler, uarte], spawn = [background_worker, initialise_late_resources])]
+    #[task(priority = 2, resources = [jambler, uarte], spawn = [ initialise_late_resources])]
     fn cli_command_dispatcher(mut ctx: cli_command_dispatcher::Context, command: String<U256>) {
         match parse_command(command) {
             Some(cli_command) => {
@@ -460,12 +541,6 @@ const APP: () = {
                             jambler.execute_task(jambler_task);
                         });
                     }
-                    CLICommand::BackgroudTask(backgound_param) => {
-                        // Spawn the software task.
-
-                        // TODO spawn call throws error if task not finished and all its static capacity is used (the size of its queue)
-                        ctx.spawn.background_worker(backgound_param).unwrap();
-                    }
                     _ => {
                         // Unexpected command parsed
                         panic!()
@@ -488,29 +563,135 @@ const APP: () = {
         }
     }
 
-    /// A software task receiver.
-    /// It has priority 1, lower is less priority.
-    /// Idle task has priority 0.
-    /// Scheduling is preemptive.
-    #[task(priority = 1, resources = [dummy])]
-    fn background_worker(mut ctx: background_worker::Context, task: u8) {
-        // TODO background work = pattern match
-        // TODO put messages in resource and have boolean resource flag
-        // Get a lock on the flag every 1000 or so iterations to see if there are new messages, if so interrupt current work
-        // Will be messy to use with a jambler function, but maybe you can pass a
-        // volatile reference to the function? -> No, lock needed...
-        // Maybe make jambler function able to run for x iterations from start position x and return if it found one or multiple or none in this slice.
+    /// A task with the lowest non-idle priority which will try to determine the connection parameters of a connection.
+    ///
+    /// It does this using as input a Queue of ConnectionSamples and a Queue of unused channel which will be filled by someone else.
+    /// It indicates it is working by setting a boolean.
+    /// All the above are RTIC resources to which a task has to get atomic access to write to them.
+    ///
+    /// This task is allowed to run very slowly.
+    /// It just has to stay out of the way of other tasks.
+    /// It is the most computationally expensive task by far because of the patter matching, but that is no problem
+    #[task(priority = 1, resources = [dcp_control])]
+    fn deduce_connection_parameters(mut ctx: deduce_connection_parameters::Context) {
+        /*
+            Declaring the local statics.
+            "A static variable can be declared within a function, which makes it inaccessible outside of the function; however, this doesn't affect its lifetime (it isn't dropped at the end of the function)."
+            So I think the initialisation is not done when this function starts, but at compile time and it is never run at runtime.
+        */
+        static mut deduction_state: DeductionState = DeductionState::new();
 
-        rprintln!("Background task called with task {}", task);
+
+        /*                   BOOTING UP of the task                    */
+
+        // Set locals used for control flow
+        let mut new_information = true; // Assume we got called because of some new information
+        let mut loop_counter : u32 = 0;
+
+
+        /*                        Work loop                           */
+
+        // As long as there was new information or we didn't try all intervals and the connection parameters have not been found, keep looping
+        while new_information {
+            // Check if we received a reset
+            // TODO does this work? does this give a reference in the closure?
+            let mut reset: bool = false;
+            ctx.resources.dcp_control.lock(|dcp_control| {
+                reset = dcp_control.reset;
+            });
+            if reset {
+                // Reset the control block and get the access address it holds now
+                let mut new_access_address: u32 = 0;
+                let mut master_phy: BlePHY = BlePHY::Uncoded1M;
+                let mut slave_phy: BlePHY = BlePHY::Uncoded1M;
+                ctx.resources.dcp_control.lock(|dcp_control| {
+                    let (na, mp, sp) = dcp_control.reset();
+                    new_access_address = na;
+                    master_phy = mp;
+                    slave_phy = sp;
+                });
+
+                // reset deduction state (persistent between tasks)
+                deduction_state.reset(new_access_address, master_phy, slave_phy);
+
+                // reset locals (non-persistent between tasks)
+                new_information = true;
+            }
+
+            // Automatically borrows &mut
+            let mut opt_conn: Option<u32> = None;
+            let mut opt_crci: Option<u32> = None;
+            ctx.resources.dcp_control.lock(|dcp_control| {
+                let optional_new_time_delta_or_crc_init = deduction_state.process_new_information_simple(
+                &mut dcp_control.connection_sample_queue,
+                &mut dcp_control.unused_channel_queue,
+                );
+                opt_conn = optional_new_time_delta_or_crc_init.0;
+                opt_crci = optional_new_time_delta_or_crc_init.1;
+            });
+
+            new_information = false;
+
+            if let Some(smallest_delta) = opt_conn {
+                rprintln!("Sniffed packet (in same chunk) {} -> New smallest delta: {}", deduction_state.get_nb_packets() , smallest_delta);
+            }
+
+            if let Some(crc_init) = opt_crci {
+                rprintln!("Sniffed packet (in same chunk) {} -> New crc init: {}", deduction_state.get_nb_packets(), crc_init);
+            }
+
+
+            // Do a run for a connection interval
+            let (counter_result, other_params_option) = deduction_state.process_interval_simple();
+
+            match &counter_result {
+                CounterInterval::NoSolutions => {
+                    rprintln!("No solutions, resetting self");
+                    ctx.resources.dcp_control.lock(|dcp_control| {
+                        dcp_control.reset = true;
+                    });
+                },
+                CounterInterval::MultipleSolutions(_) => {
+                    rprintln!("Not enough info after {} packets", deduction_state.get_nb_packets());
+                },
+                CounterInterval::ExactlyOneSolution(counter, version) => {
+                    let (conn_interval, channel_map, absolute_time_found_counter, drift, crc_init) = other_params_option.expect("Other params not supplied on exactly one solution.");
+                    let counter = *counter;
+                    let aa = deduction_state.get_access_address();
+                    let mp = deduction_state.get_master_phy();
+                    let sp = deduction_state.get_slave_phy();
+                    rprintln!("Exactly one solution! Report back:\nConn_interval: {}\nChannel map: {:#039b}\nAbsolute start time: {}us\nDrift since start {}us\nCounter at start: {}\nCrc init: {:#08X}\nAccess Address {}\nMaster phy: {}\nSlave phy: {}", conn_interval, channel_map, absolute_time_found_counter, drift, counter, crc_init, aa, mp, sp);
+                },
+                CounterInterval::Unknown => {
+                }
+                _ => {}
+            }
+
+
+            // Check if we would have new information if we entered the next loop
+            // If we have a new sample or if there is a reset
+            ctx.resources.dcp_control.lock(|dcp_control| {
+                if !(dcp_control.connection_sample_queue.is_empty()
+                    && dcp_control.unused_channel_queue.is_empty())
+                    || dcp_control.reset
+                {
+                    new_information = true;
+                }
+            });
+            loop_counter += 1;
+        }
     }
 
     // The unused interrupt used for triggering software tasks.
     // Every separate task needs its own as far as I know.
+    // There are 6 of them in total, so I can have 6 software tasks
     extern "C" {
         fn SWI0_EGU0();
         fn SWI1_EGU1();
         fn SWI2_EGU2();
         fn SWI3_EGU3();
+        fn SWI4_EGU4();
+        fn SWI5_EGU5();
     }
 };
 
@@ -557,7 +738,6 @@ fn process_jambler_return(jambler_return: Option<JamBLErReturn>) -> Option<RTICC
 #[derive(Debug)]
 enum CLICommand {
     JamBLErTask(JamBLErTask),
-    BackgroudTask(u8),
     UserInterrupt,
 }
 
@@ -601,23 +781,6 @@ fn parse_command(command: String<U256>) -> Option<CLICommand> {
                         rprintln!("Received jam command for u32 addres {}", u32_value_aa);
                         //TODO change to proper command
                         Some(CLICommand::JamBLErTask(JamBLErTask::Jam))
-                    } else {
-                        // 1st param was not hex value
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            "background" => {
-                if let Some(param_1_aa) = get_split(command.as_str(), ' ', 1) {
-                    if let Some(u32_value_aa) = hex_str_to_u32(param_1_aa) {
-                        rprintln!(
-                            "Received background command for u32 addres {}",
-                            u32_value_aa
-                        );
-                        //TODO change to proper command
-                        Some(CLICommand::BackgroudTask(u32_value_aa as u8))
                     } else {
                         // 1st param was not hex value
                         None

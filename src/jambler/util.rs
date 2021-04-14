@@ -163,11 +163,11 @@ impl TimeStamp {
     }
 }
 
-
 impl core::fmt::Display for TimeStamp {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         if self.days != 0 {
-            write!(f, 
+            write!(
+                f,
                 "d {} {}:{} s {} ms {} micros {}: ",
                 self.days,
                 self.hours,
@@ -177,28 +177,22 @@ impl core::fmt::Display for TimeStamp {
                 self.microseconds
             )
         } else if self.hours != 0 {
-            write!(f, 
+            write!(
+                f,
                 "{}:{} s {} ms {} micros {}: ",
-                self.hours,
-                self.minutes,
-                self.seconds,
-                self.milliseconds,
-                self.microseconds
+                self.hours, self.minutes, self.seconds, self.milliseconds, self.microseconds
             )
         } else if self.minutes != 0 {
-            write!(f, 
+            write!(
+                f,
                 "min {} s {} ms {} micros {}: ",
-                self.minutes,
-                self.seconds,
-                self.milliseconds,
-                self.microseconds
+                self.minutes, self.seconds, self.milliseconds, self.microseconds
             )
         } else if self.seconds != 0 {
-            write!(f, 
+            write!(
+                f,
                 "s {} ms {} micros {}: ",
-                self.seconds,
-                self.milliseconds,
-                self.microseconds
+                self.seconds, self.milliseconds, self.microseconds
             )
         } else if self.milliseconds != 0 {
             write!(f, "ms {} micros {}: ", self.milliseconds, self.microseconds)

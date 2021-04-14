@@ -122,7 +122,7 @@ pub struct DiscoveredAccessAddress {
 }
 
 /// For returning things the master should knkow
-/// 
+///
 /// TODO HAS TO BE AS SMALL AS POSSIBLE, WILL GET COPIED MULTIPLE TIMES
 #[derive(Debug)]
 pub enum StateMessage {
@@ -138,6 +138,13 @@ pub enum StateMessage {
     HarvestedSubevent(HarvestedSubEvent, bool),
     /// Holds the channel index of an unused channel (listened for max_conn_interval * number_intervals and received nothing) and a boolean indicating whether or not the sniffer has completed listening on all the channels of his channel chain.
     UnusedChannel(u8, bool),
+    /// Used to signal the jambler host that it has to throw away all
+    /// previous harvested subevents and unused channel messages and
+    /// completely restart deducing the connection parameters when new
+    /// harvested subevents or unused channels follow.
+    /// This is sent every time the harvested packet state is started
+    /// Holds the access address for the next connection and the master and slave phy
+    ResetDeducingConnectionParameters(u32, BlePHY, BlePHY),
 }
 
 /// Struct for letting a state return something

@@ -36,9 +36,9 @@ pub struct HarvestedSubEvent {
     /// The time listened on this channel before the packet was caught,
     pub time_on_the_channel: u32,
     /// packet
-    pub packet : HarvestedPacket,
+    pub packet: HarvestedPacket,
     /// response
-    pub response : Option<HarvestedPacket>,
+    pub response: Option<HarvestedPacket>,
 }
 
 /// Implementing display for it because it is very necessary for debugging
@@ -49,8 +49,7 @@ impl core::fmt::Display for HarvestedSubEvent {
         match &self.response {
             Some(response) => {
                 write!(f, "\nReceived full subevent on channel {} at {} after listening for {} on it:\nMaster{}\nSlave{}\n", self.channel, time, time_on_the_channel, self.packet, response)
-
-            },
+            }
             None => {
                 write!(f, "\nReceived partial subevent on channel {} at {} after listening for {} on it:\nPacket{}\n", self.channel, time, time_on_the_channel, self.packet)
             }
@@ -66,24 +65,31 @@ impl core::fmt::Debug for HarvestedSubEvent {
 
 /// A harvested packet
 pub struct HarvestedPacket {
-    pub pdu : Box<PDU>,
-    pub phy : BlePHY,
-    pub crc : u32,
-    pub rssi : i8,
+    pub pdu: Box<PDU>,
+    pub phy: BlePHY,
+    pub crc: u32,
+    pub rssi: i8,
 }
 
 impl core::fmt::Display for HarvestedPacket {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let three_byte_header : bool = self.pdu[0] & 0b0010_0000 != 0;
+        let three_byte_header: bool = self.pdu[0] & 0b0010_0000 != 0;
         if three_byte_header {
-            write!(f, "\n|         Header      | ... Payload ... |   CRC   |  RSSI   | PHY
+            write!(
+                f,
+                "\n|         Header      | ... Payload ... |   CRC   |  RSSI   | PHY
                        \n|{:08b} {:3} {:08b}| ...{:3} bytes... | 0x{:06X}| {:>4}dBm | {:?}
-                       ", self.pdu[0], self.pdu[1], self.pdu[2], self.pdu[1], self.crc, self.rssi, self.phy)
-        }
-        else {
-            write!(f, "\n|   Header   | ... Payload ... |   CRC   |  RSSI   | PHY
+                       ",
+                self.pdu[0], self.pdu[1], self.pdu[2], self.pdu[1], self.crc, self.rssi, self.phy
+            )
+        } else {
+            write!(
+                f,
+                "\n|   Header   | ... Payload ... |   CRC   |  RSSI   | PHY
                        \n|{:08b} {:3}| ...{:3} bytes... | 0x{:06X}| {:>4}dBm | {:?}
-                       ", self.pdu[0], self.pdu[1], self.pdu[1], self.crc, self.rssi, self.phy)
+                       ",
+                self.pdu[0], self.pdu[1], self.pdu[1], self.crc, self.rssi, self.phy
+            )
         }
     }
 }
@@ -129,7 +135,7 @@ pub struct HarvestPackets {
     request_periodic_timer_on_next_interval_timer_interrupt: bool,
     /// a cache so we do not need to recalculate with floats on every interval timer interrupt
     time_on_one_channel_cache: u32,
-    /// A box for our static pseudo heap to keep the packet in. 
+    /// A box for our static pseudo heap to keep the packet in.
     /// A pointer (mutable reference) to this will be provided to jamblerhal to fill it.
     first_caught_packet: Box<PDU>,
     /// Another buffer for the jamblerhal to write the possibly second packet in an event to
@@ -184,7 +190,13 @@ impl HarvestPackets {
 
         radio.prepare_for_config_change();
         // Config the radio
-        radio.harvest_packets_quick_config(self.access_address, self.phy, channel, self.crc_init, &mut self.first_caught_packet);
+        radio.harvest_packets_quick_config(
+            self.access_address,
+            self.phy,
+            channel,
+            self.crc_init,
+            &mut self.first_caught_packet,
+        );
         radio.receive();
 
         // set the start time to the new channel
@@ -198,7 +210,7 @@ impl HarvestPackets {
 
 impl JammerState for HarvestPackets {
     /// Creates a dummy harvestPackets state
-    /// 
+    ///
     /// Can panic if there is no room on the PDU heap.
     /// TODO this always allocates 2 PDUs even if the state is not in use because it will be used as a singleton...
     fn new() -> HarvestPackets {
@@ -340,7 +352,13 @@ impl JammerState for HarvestPackets {
         radio.prepare_for_config_change();
 
         // Config the radio
-        radio.harvest_packets_quick_config(self.access_address, self.phy, channel, self.crc_init, &mut self.first_caught_packet);
+        radio.harvest_packets_quick_config(
+            self.access_address,
+            self.phy,
+            channel,
+            self.crc_init,
+            &mut self.first_caught_packet,
+        );
         rprintln!("Init to harvesting for packets: channel {}.", channel);
 
         // Cache the time we will wait
@@ -348,6 +366,14 @@ impl JammerState for HarvestPackets {
 
         return_value.timing_requirements = Some(IntervalTimerRequirements::Periodic(
             self.time_on_one_channel_cache,
+        ));
+
+        // Signal the host it should forget all previously harvested information and restart
+        // IMPORTANT this means you cannot reconfigure this state by restarting it!!
+        return_value.state_message = Some(StateMessage::ResetDeducingConnectionParameters(
+            self.access_address,
+            self.phy,
+            self.slave_phy,
         ));
     }
 
@@ -482,7 +508,7 @@ impl JammerState for HarvestPackets {
         // the state.rs reset the radio
 
         // TODO use the stop() in states to drop any buffer they are still holding
-        // The buffers are not dropped because I do not want them to be options. 
+        // The buffers are not dropped because I do not want them to be options.
         // They are just statically allocated somewhere, taking 2*PDU_SIZE (half a kilobyte, we have 264 in nrf52840).
     }
 
@@ -499,8 +525,11 @@ impl JammerState for HarvestPackets {
     ) {
         // Get the packet from the hal
         // radio is responsible for timing out
-        let hal_ret = radio.harvest_packets_busy_wait_slave_response(self.slave_phy, &mut self.first_caught_packet, &mut self.second_caught_packet);
-
+        let hal_ret = radio.harvest_packets_busy_wait_slave_response(
+            self.slave_phy,
+            &mut self.first_caught_packet,
+            &mut self.second_caught_packet,
+        );
 
         match hal_ret {
             None => {
@@ -513,7 +542,7 @@ impl JammerState for HarvestPackets {
 
                 let channel = self.channel_chain[self.current_channel as usize];
 
-                // Predict channel chain complete, we cannot use the next channel function here because it messes with the buffers... 
+                // Predict channel chain complete, we cannot use the next channel function here because it messes with the buffers...
                 let will_wrap: bool;
                 if self.current_channel == self.channel_chain.len() - 1 {
                     will_wrap = true;
@@ -538,14 +567,18 @@ impl JammerState for HarvestPackets {
                                         channel: channel,
                                         time: parameters.current_time,
                                         time_on_the_channel: (parameters.current_time
-                                        - self.start_time_current_channel) as u32,
-                                        packet : HarvestedPacket {
-                                            pdu : core::mem::replace(&mut self.first_caught_packet, new_buffer.init([0;PDU_SIZE])),
-                                            phy : self.phy,
-                                            crc : master_crc,
-                                            rssi : master_rssi,
+                                            - self.start_time_current_channel)
+                                            as u32,
+                                        packet: HarvestedPacket {
+                                            pdu: core::mem::replace(
+                                                &mut self.first_caught_packet,
+                                                new_buffer.init([0; PDU_SIZE]),
+                                            ),
+                                            phy: self.phy,
+                                            crc: master_crc,
+                                            rssi: master_rssi,
                                         },
-                                        response : None,
+                                        response: None,
                                     },
                                     will_wrap,
                                 ));
@@ -564,50 +597,60 @@ impl JammerState for HarvestPackets {
                                 // Try to get a second one
                                 match PDU::alloc() {
                                     Some(second_new_buffer) => {
-                                        return_value.state_message = Some(StateMessage::HarvestedSubevent(
-                                            HarvestedSubEvent {
-                                                channel: channel,
-                                                time: parameters.current_time,
-                                                time_on_the_channel: (parameters.current_time
-                                                - self.start_time_current_channel) as u32,
-                                                packet : HarvestedPacket {
-                                                    pdu : core::mem::replace(&mut self.first_caught_packet, new_buffer.init([0;PDU_SIZE])),
-                                                    phy : self.phy,
-                                                    crc : master_crc,
-                                                    rssi : master_rssi,
+                                        return_value.state_message =
+                                            Some(StateMessage::HarvestedSubevent(
+                                                HarvestedSubEvent {
+                                                    channel: channel,
+                                                    time: parameters.current_time,
+                                                    time_on_the_channel: (parameters.current_time
+                                                        - self.start_time_current_channel)
+                                                        as u32,
+                                                    packet: HarvestedPacket {
+                                                        pdu: core::mem::replace(
+                                                            &mut self.first_caught_packet,
+                                                            new_buffer.init([0; PDU_SIZE]),
+                                                        ),
+                                                        phy: self.phy,
+                                                        crc: master_crc,
+                                                        rssi: master_rssi,
+                                                    },
+                                                    response: Some(HarvestedPacket {
+                                                        pdu: core::mem::replace(
+                                                            &mut self.second_caught_packet,
+                                                            second_new_buffer.init([0; PDU_SIZE]),
+                                                        ),
+                                                        phy: self.slave_phy,
+                                                        crc: slave_crc,
+                                                        rssi: slave_rssi,
+                                                    }),
                                                 },
-                                                response : Some(
-                                                    HarvestedPacket {
-                                                        pdu : core::mem::replace(&mut self.second_caught_packet, second_new_buffer.init([0;PDU_SIZE])),
-                                                        phy : self.slave_phy,
-                                                        crc : slave_crc,
-                                                        rssi : slave_rssi,
-                                                    }
-                                                ),
-                                            },
-                                            will_wrap,
-                                        ));
-
+                                                will_wrap,
+                                            ));
                                     }
                                     None => {
                                         // could not get the second buffer
                                         // Only send the first one and send a warning
-                                        return_value.state_message = Some(StateMessage::HarvestedSubevent(
-                                            HarvestedSubEvent {
-                                                channel: channel,
-                                                time: parameters.current_time,
-                                                time_on_the_channel: (parameters.current_time
-                                                - self.start_time_current_channel) as u32,
-                                                packet : HarvestedPacket {
-                                                    pdu : core::mem::replace(&mut self.first_caught_packet, new_buffer.init([0;PDU_SIZE])),
-                                                    phy : self.phy,
-                                                    crc : master_crc,
-                                                    rssi : master_rssi,
+                                        return_value.state_message =
+                                            Some(StateMessage::HarvestedSubevent(
+                                                HarvestedSubEvent {
+                                                    channel: channel,
+                                                    time: parameters.current_time,
+                                                    time_on_the_channel: (parameters.current_time
+                                                        - self.start_time_current_channel)
+                                                        as u32,
+                                                    packet: HarvestedPacket {
+                                                        pdu: core::mem::replace(
+                                                            &mut self.first_caught_packet,
+                                                            new_buffer.init([0; PDU_SIZE]),
+                                                        ),
+                                                        phy: self.phy,
+                                                        crc: master_crc,
+                                                        rssi: master_rssi,
+                                                    },
+                                                    response: None,
                                                 },
-                                                response : None,
-                                            },
-                                            will_wrap,
-                                        ));
+                                                will_wrap,
+                                            ));
                                         rprintln!("WARNING: harvest packet flooding, dropped the response packet of a full harvested subevent because there was no more room for a new buffer, sending partial instead")
                                     }
                                 }
@@ -616,14 +659,12 @@ impl JammerState for HarvestPackets {
                                 rprintln!("WARNING: harvest packet flooding, dropped full harvested subevent because there was no more room for a new buffer")
                             }
                         }
-                    },
+                    }
                 }
-
 
                 // next channel
                 let channel_chain_completed = self.next_channel(radio, parameters.current_time);
                 assert_eq!(channel_chain_completed, will_wrap);
-
 
                 // And request a periodic timer
                 // The interval timer must be reset by this as well!! We do not want an interrupt from the countdown after this!!
@@ -677,6 +718,8 @@ impl JammerState for HarvestPackets {
                 self.time_on_one_channel_cache,
             ));
         }
+
+        // TODO remove from channel chain? This will cause us to capture more packets quickly if we wrap but do not have enough information for anchorpoints etc...
 
         /*
         rprintln!(

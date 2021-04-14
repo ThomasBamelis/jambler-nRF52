@@ -1,11 +1,11 @@
 pub mod nrf52840;
 
 use super::BlePHY;
+use super::{PDU, PDU_SIZE};
 use heapless::{
     pool,
     pool::singleton::{Box, Pool},
 };
-use crate::jambler::{PDU_SIZE, PDU};
 
 #[derive(Debug, Clone)]
 pub enum JamBLErHalError {
@@ -81,7 +81,7 @@ pub trait JamBLErHal {
         phy: BlePHY,
         channel: u8,
         crc_init: Option<u32>,
-        master_pdu_buffer : &mut Box<PDU>,
+        master_pdu_buffer: &mut Box<PDU>,
     );
 
     /// Gets called after radio interrupt handler.
@@ -92,8 +92,8 @@ pub trait JamBLErHal {
     fn harvest_packets_busy_wait_slave_response(
         &mut self,
         slave_phy: BlePHY,
-        master_pdu_buffer : &mut Box<PDU>,
-        slave_pdu_buffer : &mut Box<PDU>
+        master_pdu_buffer: &mut Box<PDU>,
+        slave_pdu_buffer: &mut Box<PDU>,
     ) -> Option<((u32, i8), Option<(u32, i8)>)>;
 }
 
