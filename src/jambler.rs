@@ -52,7 +52,7 @@ pub fn initialise_pdu_heap(memory_pool: &'static mut [u8]) -> usize {
 /// The JamBLEr controller is responsible for receiving tasks and following the correct state transitions for that task.
 /// Whether the state itself indicates it wants to transition or because required background work is done.
 /// The controller is responsible for proper task execution in the same way that the state store is responsible for proper state execution.
-pub struct JamBLEr<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> {
+pub struct Jambler<H: JamblerHal, T: JamblerTimer, I: JamblerIntervalTimer> {
     /// The abstraction of the radio peripheral
     jammer_hal: H,
     /// The abstraction of the long term timer
@@ -62,7 +62,7 @@ pub struct JamBLEr<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> {
     /// The state store, holding exactly 1 struct for every state and dispatching calls to the current state.
     state_store: StateStore,
     /// The task currently being executed by Jambler.
-    current_task: JamBLErTask,
+    current_task: JamblerTask,
     /// The delays states suffer when they ask for different changes.
     timing_delays: TimingDelays,
     /// A reusable struct for state parameters
@@ -83,7 +83,7 @@ struct TimingDelays {
 
 /// TODO move to state.rs
 #[derive(Clone, Debug)]
-pub enum JamBLErState {
+pub enum JamblerState {
     Idle,
     DiscoveringAAs,
     HarvestingPackets,
@@ -99,27 +99,27 @@ pub enum JamBLErState {
 ///
 /// See the diagram about task state diagrams to better understand this.
 #[derive(Clone, Debug)]
-pub enum JamBLErTask {
+pub enum JamblerTask {
     UserInterrupt,
     Idle,
     DiscoverAas,
     Jam,
 }
 
-impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
+impl<H: JamblerHal, T: JamblerTimer, I: JamblerIntervalTimer> Jambler<H, T, I> {
     pub fn new(
         jammer_hal: H,
         mut jammer_timer: T,
         jammer_interval_timer: I,
-    ) -> JamBLEr<H, T, I> {
+    ) -> Jambler<H, T, I> {
         // Start the timer
         jammer_timer.start();
-        JamBLEr {
+        Jambler {
             jammer_hal,
             jammer_timer,
             jammer_interval_timer,
             state_store: StateStore::new(),
-            current_task: JamBLErTask::Idle,
+            current_task: JamblerTask::Idle,
             timing_delays: TimingDelays {
                 state_change_delay: 0,
                 periodic_no_change_delay: 0,
@@ -134,7 +134,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
     }
 
     /// Should be called from main or whatever to make JamBLEr do what user wants.
-    pub fn execute_task(&mut self, task: JamBLErTask) {
+    pub fn execute_task(&mut self, task: JamblerTask) {
         rprintln!("Received task {:?}", task);
         let prev_task = self.current_task.clone();
         self.current_task = task;
@@ -146,17 +146,17 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
         // These transition the jambler into the start state of the given task.
         // The current state should always be idle, except for a user interrupt.
         match self.current_task {
-            JamBLErTask::UserInterrupt => {
+            JamblerTask::UserInterrupt => {
                 self.user_interrupt();
             }
-            JamBLErTask::Idle => {
-                self.state_transition(&JamBLErState::Idle, StateConfig::new());
+            JamblerTask::Idle => {
+                self.state_transition(&JamblerState::Idle, StateConfig::new());
             }
-            JamBLErTask::DiscoverAas => {
+            JamblerTask::DiscoverAas => {
                 // TODO specify all in command or I2C communication
                 let mut config = StateConfig::new();
                 // for now, listen on legacy phy, all data channels and switch every 3 seconds
-                config.phy = Some(BlePHY::Uncoded1M);
+                config.phy = Some(BlePhy::Uncoded1M);
                 config.interval = Some(3 * 1_000_000);
                 let mut cc: Vec<u8, U64> = Vec::new();
                 for i in 0..=36 {
@@ -164,17 +164,17 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                 }
                 config.channel_chain = Some(cc);
 
-                self.state_transition(&JamBLErState::DiscoveringAAs, config);
+                self.state_transition(&JamblerState::DiscoveringAAs, config);
             }
-            JamBLErTask::Jam => {
+            JamblerTask::Jam => {
                 // TODO specify all in command or I2C communication
                 let mut config = StateConfig::new();
 
                 // for now, listen on legacy phy, all data channels
                 // max interval for 100, advertising AA
                 config.access_address = Some(0xAF9ABB1B);
-                config.phy = Some(BlePHY::Uncoded2M);
-                config.slave_phy = Some(BlePHY::Uncoded2M);
+                config.phy = Some(BlePhy::Uncoded2M);
+                config.slave_phy = Some(BlePhy::Uncoded2M);
                 config.interval = Some(4_000_000);
                 let mut cc: Vec<u8, U64> = Vec::new();
                 for i in 24..=24 {
@@ -193,7 +193,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                 // interval timer 500 ppm so to speak
                 config.long_term_timer_ppm = Some(500);
 
-                self.state_transition(&JamBLErState::HarvestingPackets, config);
+                self.state_transition(&JamblerState::HarvestingPackets, config);
             }
         };
     }
@@ -201,7 +201,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
     /// What happens on a user interrupt.
     /// For now, just idle.
     fn user_interrupt(&mut self) {
-        self.state_transition(&JamBLErState::Idle, StateConfig::new());
+        self.state_transition(&JamblerState::Idle, StateConfig::new());
     }
 
     /// Helper function for setting the interval timer.
@@ -231,7 +231,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
     /// Better safe than sorry for now.
     ///
     /// Resets the parameters and results after all is done.
-    pub fn state_transition(&mut self, new_state: &JamBLErState, config: StateConfig) {
+    pub fn state_transition(&mut self, new_state: &JamblerState, config: StateConfig) {
         // Disable interval timer to prevent it preempting this in the middle.
         self.jammer_interval_timer.reset();
 
@@ -280,7 +280,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
 
     /// Radio interrupt received, dispatch it to the state
     #[inline(always)]
-    pub fn handle_radio_interrupt(&mut self) -> Option<JamBLErReturn> {
+    pub fn handle_radio_interrupt(&mut self) -> Option<JamblerReturn> {
         // Get current time
         self.state_parameters.current_time = self.jammer_timer.get_time_micro_seconds();
 
@@ -328,7 +328,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
     ///
     /// TODO have to have the return as mutable to fill in because the lock closure cannot return anything
     #[inline(always)]
-    pub fn handle_interval_timer_interrupt(&mut self, closure_return: &mut Option<JamBLErReturn>) {
+    pub fn handle_interval_timer_interrupt(&mut self, closure_return: &mut Option<JamblerReturn>) {
         // Necessary. At least for nrf because event needs to be reset.
         self.jammer_interval_timer.interrupt_handler();
 
@@ -391,11 +391,11 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
     ///
     /// TODO get rid of the clones in the if lets
     #[inline(always)]
-    fn process_state_return_value(&mut self, handle_duration: u64) -> Option<JamBLErReturn> {
+    fn process_state_return_value(&mut self, handle_duration: u64) -> Option<JamblerReturn> {
         // If new timing requirements, execute them
         // TODO these enums get coppied
         if let Some(timing_requirements) = self.state_return.timing_requirements.clone() {
-            self.set_interval_timer(&timing_requirements.clone());
+            self.set_interval_timer(&timing_requirements);
             self.state_return.timing_requirements = None;
         }
 
@@ -412,9 +412,9 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                     interval_timer_change_delay,
                 ) => {
                     self.timing_delays = TimingDelays {
-                        state_change_delay: state_change_delay,
-                        periodic_no_change_delay: periodic_no_change_delay,
-                        interval_timer_change_delay: interval_timer_change_delay,
+                        state_change_delay,
+                        periodic_no_change_delay,
+                        interval_timer_change_delay,
                     };
 
                     // TODO delete
@@ -422,17 +422,17 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
                     rprintln!("State change delay: {} micros\nPeriodic without change delay: {} micros\nInterval timer change delay {} micros", state_change_delay, periodic_no_change_delay, interval_timer_change_delay);
 
                     // Tell RTIC we are done initialising
-                    jambler_return = Some(JamBLErReturn::InitialisationComplete);
+                    jambler_return = Some(JamblerReturn::InitialisationComplete);
                 }
                 // Received a harvested subevent, pass a command for processing its
                 StateMessage::HarvestedSubevent(harvested, wrap) => {
-                    jambler_return = Some(JamBLErReturn::HarvestedSubEvent(harvested, wrap))
+                    jambler_return = Some(JamblerReturn::HarvestedSubEvent(harvested, wrap))
                 }
                 StateMessage::UnusedChannel(channel, wrap) => {
-                    jambler_return = Some(JamBLErReturn::HarvestedUnusedChannel(channel, wrap))
+                    jambler_return = Some(JamblerReturn::HarvestedUnusedChannel(channel, wrap))
                 }
                 StateMessage::ResetDeducingConnectionParameters(new_access_address, mp, sp) => {
-                    jambler_return = Some(JamBLErReturn::ResetDeducingConnectionParameters(
+                    jambler_return = Some(JamblerReturn::ResetDeducingConnectionParameters(
                         new_access_address,
                         mp,
                         sp,
@@ -451,7 +451,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
         if let Some((new_state, config_option)) = self.state_return.state_transition.take() {
             // TODO write the option to the parameters before this, so you don't need to do all this unnecessary copying
             // If config was None, give the default empty state config
-            self.state_transition(&new_state, config_option.unwrap_or(StateConfig::new()))
+            self.state_transition(&new_state, config_option.unwrap_or_default())
         }
 
         jambler_return
@@ -469,7 +469,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
         config.interval = Some(CALIBRATION_INTERVAL);
 
         // Start with calibration
-        self.state_transition(&JamBLErState::CalibrateIntervalTimer, config);
+        self.state_transition(&JamblerState::CalibrateIntervalTimer, config);
     }
 }
 
@@ -479,7 +479,7 @@ impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
 
 /// Jambler should never give an "output string", the slave/master code should parse and build an output string itself if it needs it.
 /// TODO make a heap for these, they get big...
-pub enum JamBLErReturn {
+pub enum JamblerReturn {
     //OutputString(String<U256>),
     InitialisationComplete,
     /// Tell host to process a full (both packets received) subevent
@@ -487,17 +487,17 @@ pub enum JamBLErReturn {
     HarvestedSubEvent(HarvestedSubEvent, bool),
     /// Indicates jambler timed out while listening on a channel
     HarvestedUnusedChannel(u8, bool),
-    ResetDeducingConnectionParameters(u32, BlePHY, BlePHY),
+    ResetDeducingConnectionParameters(u32, BlePhy, BlePhy),
     NoReturn,
 }
 
-impl core::fmt::Display for JamBLErReturn {
+impl core::fmt::Display for JamblerReturn {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            JamBLErReturn::InitialisationComplete => {
+            JamblerReturn::InitialisationComplete => {
                 write!(f, "JamBLEr initialisation completed")
             }
-            JamBLErReturn::HarvestedSubEvent(harvested_subevent, completed_channel_chain) => {
+            JamblerReturn::HarvestedSubEvent(harvested_subevent, completed_channel_chain) => {
                 if *completed_channel_chain {
                     write!(
                         f,
@@ -508,7 +508,7 @@ impl core::fmt::Display for JamBLErReturn {
                     write!(f, "Harvested subevent{}", harvested_subevent)
                 }
             }
-            JamBLErReturn::HarvestedUnusedChannel(channel, completed_channel_chain) => {
+            JamblerReturn::HarvestedUnusedChannel(channel, completed_channel_chain) => {
                 if *completed_channel_chain {
                     write!(
                         f,
@@ -519,54 +519,54 @@ impl core::fmt::Display for JamBLErReturn {
                     write!(f, "Found channel {} is unused", channel)
                 }
             }
-            JamBLErReturn::ResetDeducingConnectionParameters(new_access_address, mp, sp) => {
+            JamblerReturn::ResetDeducingConnectionParameters(new_access_address, mp, sp) => {
                 write!(
                     f,
                     "Reset deducing connection parameters with new access address 0x{:08X} and phys {} and {}",
                     new_access_address, mp, sp
                 )
             }
-            JamBLErReturn::NoReturn => {
+            JamblerReturn::NoReturn => {
                 write!(f, "No return value")
             }
         }
     }
 }
 
-impl core::fmt::Debug for JamBLErReturn {
+impl core::fmt::Debug for JamblerReturn {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         write!(f, "{}", self)
     }
 }
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum BlePHY {
+pub enum BlePhy {
     Uncoded1M,
     Uncoded2M,
     CodedS2,
     CodedS8,
 }
 
-impl core::fmt::Display for BlePHY {
+impl core::fmt::Display for BlePhy {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            BlePHY::Uncoded1M => {
+            BlePhy::Uncoded1M => {
                 write!(f, "uncoded 1Mbit/s (legacy)")
             }
-            BlePHY::Uncoded2M => {
+            BlePhy::Uncoded2M => {
                 write!(f, "uncoded 2Mbit/s (high speed)")
             }
-            BlePHY::CodedS2 => {
+            BlePhy::CodedS2 => {
                 write!(f, "long range coded 500Kbit/s (s=2)")
             }
-            BlePHY::CodedS8 => {
+            BlePhy::CodedS8 => {
                 write!(f, "long range coded 125Kbit/s (s=8)")
             }
         }
     }
 }
 
-impl core::fmt::Debug for BlePHY {
+impl core::fmt::Debug for BlePhy {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         write!(f, "{}", self)
     }
@@ -617,7 +617,7 @@ pub struct ConnectionSamplePacket {
     /// Remember, when we settle on a crc_init, this will be the true crc init if it was received correctly.
     pub reversed_crc_init: u32,
     /// The phy the packet was caught on (remember, in BLE5 master and slave can send on different PHYs)
-    pub phy: BlePHY,
+    pub phy: BlePhy,
     /// The rssi at which the packet has been captured
     pub rssi: i8,
 }

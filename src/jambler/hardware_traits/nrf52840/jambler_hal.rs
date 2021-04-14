@@ -1,9 +1,9 @@
-use crate::jambler::HalHarvestedPacket;
+use crate::jambler::{HalHarvestedPacket, hardware_traits::PossiblePackets};
 use hal::pac::RADIO;
 use nrf52840_hal as hal; // Embedded_hal implementation for my chip
 
-use super::super::{JamBLErHal};
-use crate::jambler::BlePHY;
+use super::super::{JamblerHal};
+use crate::jambler::BlePhy;
 
 use core::sync::atomic::{compiler_fence, Ordering::SeqCst};
 
@@ -17,20 +17,20 @@ use heapless::{
 /// A struct for altering the radio module of the nrf52840.
 /// This struct will be held in the JamBLEr struct which is supposed to be static and in ram.
 /// So the having the buffers in here should be no problem, just like with the serial code.
-pub struct Nrf52840JamBLEr {
+pub struct Nrf52840Jambler {
     radio_peripheral: RADIO,
     // TODO adapt to maximum size to ever be received
     // TODO deliver payloads in heapless vectors (len) and make a packet struct to return
     send_buffer: [u8; 300],
     receive_buffer: [u8; 300],
     /// For remembering for discovering AAs
-    current_phy: Option<BlePHY>,
+    current_phy: Option<BlePhy>,
     current_channel: Option<u8>,
 }
 
-impl Nrf52840JamBLEr {
-    pub fn new(radio: RADIO) -> Nrf52840JamBLEr {
-        Nrf52840JamBLEr {
+impl Nrf52840Jambler {
+    pub fn new(radio: RADIO) -> Nrf52840Jambler {
+        Nrf52840Jambler {
             radio_peripheral: radio,
             send_buffer: [0; 300],    // has to be 258 at least = max pdu length
             receive_buffer: [0; 300], // has to be 258 at least = max pdu length
@@ -75,7 +75,7 @@ impl Nrf52840JamBLEr {
 // TODO IMPORTANT: YOU CAN READ THE CURRENT RADIO STATE FROM ITS STATE REGISTER
 
 /// Implement the necessary tools for the jammer.
-impl JamBLErHal for Nrf52840JamBLEr {
+impl JamblerHal for Nrf52840Jambler {
     /// Configures the radio to listen for the preamble of packet as access address.
     /// This will make receiving address match on the preamble.
     /// The coded PHY requires even more hacky stuff.
@@ -88,7 +88,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
     ///
     /// Radio will always be disabled because of prepare function when entering this.
     #[inline]
-    fn config_discover_access_addresses(&mut self, phy: BlePHY, channel: u8) {
+    fn config_discover_access_addresses(&mut self, phy: BlePhy, channel: u8) {
         // TODO fix the write after write bugs ,where you have to use modify after the first write because it will erase it otherwise
 
         if self.radio_peripheral.power.read().power().is_disabled() {
@@ -116,7 +116,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
         radio.rxaddresses.write(|w| w.addr0().enabled());
 
         // Set the frequency to the channel
-        let freq = Nrf52840JamBLEr::channel_to_frequency_register_value(channel);
+        let freq = Nrf52840Jambler::channel_to_frequency_register_value(channel);
         radio
             .frequency
             .write(|w| unsafe { w.frequency().bits(freq) });
@@ -128,7 +128,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
             .write(|w| unsafe { w.packetptr().bits(ptr) });
 
         match phy {
-            BlePHY::Uncoded1M => {
+            BlePhy::Uncoded1M => {
                 radio.mode.write(|w| w.mode().ble_1mbit());
 
                 // Set the address to match on to the preamble
@@ -155,17 +155,17 @@ impl JamBLErHal for Nrf52840JamBLEr {
                     w.maxlen().bits(10).statlen().bits(10).balen().bits(1) // TODO Illegal to change to 1? try 2?
                 });
             }
-            BlePHY::Uncoded2M => {
+            BlePhy::Uncoded2M => {
                 rprintln!("discovering 2m not implemented yet");
                 radio.mode.write(|w| w.mode().ble_2mbit());
                 // set 16-bit preamble in pcnf0!
             }
-            BlePHY::CodedS2 => {
+            BlePhy::CodedS2 => {
                 rprintln!("discovering c2 not implemented yet");
                 // TODO will be 1mbit actually, just here now to show you
                 radio.mode.write(|w| w.mode().ble_lr500kbit());
             }
-            BlePHY::CodedS8 => {
+            BlePhy::CodedS8 => {
                 rprintln!("discovering c8 not implemented yet");
                 radio.mode.write(|w| w.mode().ble_lr125kbit());
             }
@@ -213,7 +213,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
 
         // TODO decipher what is now in the rx_buffer. See main lin 508 and further damien
         match self.current_phy.unwrap() {
-            BlePHY::Uncoded1M => {
+            BlePhy::Uncoded1M => {
                 // received buffer now contains the aa in its first 4 bytes
                 // and the 16 first bits of the pdu = header
                 // Use header to see if the packet is the control pdu we are looking for
@@ -232,7 +232,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
                         | received_bytes[0] as u32;
 
                     if is_valid_discover_header(first_header_byte, second_header_byte)
-                        && is_valid_aa(aa, BlePHY::Uncoded1M)
+                        && is_valid_aa(aa, BlePhy::Uncoded1M)
                     {
                         //TODO delete
                         rprintln!(
@@ -250,20 +250,20 @@ impl JamBLErHal for Nrf52840JamBLEr {
                     // do not do this for last byte
                     for i in 0..9 {
                         // shift it right
-                        received_bytes[i] = received_bytes[i] >> 1;
+                        received_bytes[i] >>= 1;
                         // Fill left bit with the one that will get kicked ou in next iteration
                         // See this correcting for having received too soon
                         received_bytes[i] |= (received_bytes[i + 1] & 0b0000_0001) << 7;
                     }
                 }
             }
-            BlePHY::Uncoded2M => {
+            BlePhy::Uncoded2M => {
                 rprintln!("discovering 2m not implemented yet");
             }
-            BlePHY::CodedS2 => {
+            BlePhy::CodedS2 => {
                 rprintln!("discovering c2 not implemented yet");
             }
-            BlePHY::CodedS8 => {
+            BlePhy::CodedS8 => {
                 rprintln!("discovering c8 not implemented yet");
             }
         }
@@ -489,7 +489,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
     fn config_harvest_packets(
         &mut self,
         access_address: u32,
-        phy: BlePHY,
+        phy: BlePhy,
         channel: u8,
         crc_init: Option<u32>,
     ) {
@@ -520,7 +520,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
             .write(|w| unsafe { w.packetptr().bits(ptr) });
 
         // Set the frequency to the channel
-        let freq = Nrf52840JamBLEr::channel_to_frequency_register_value(channel);
+        let freq = Nrf52840Jambler::channel_to_frequency_register_value(channel);
         radio
             .frequency
             .write(|w| unsafe { w.frequency().bits(freq) });
@@ -539,7 +539,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
         radio.crccnf.write(|w| w.len().three().skipaddr().skip());
         radio
             .crcpoly
-            .write(|w| unsafe { w.crcpoly().bits(0b00000001_00000000_00000110_01011011) });
+            .write(|w| unsafe { w.crcpoly().bits(0b0000_0001_0000_0000_0000_0110_0101_1011) });
 
         // Set datawhitening seed
         radio
@@ -578,28 +578,28 @@ impl JamBLErHal for Nrf52840JamBLEr {
         // PHY dependend
         // Set the PHY mode and the corresponding preamble and cilen and termlen
         match phy {
-            BlePHY::Uncoded1M => {
+            BlePhy::Uncoded1M => {
                 radio.mode.write(|w| w.mode().ble_1mbit());
                 radio.modecnf0.write(|w| w.ru().default().dtx().b1());
                 radio
                     .pcnf0
                     .modify(|_, w| unsafe { w.plen()._8bit().cilen().bits(0).termlen().bits(0) });
             }
-            BlePHY::Uncoded2M => {
+            BlePhy::Uncoded2M => {
                 radio.mode.write(|w| w.mode().ble_2mbit());
                 radio.modecnf0.write(|w| w.ru().default().dtx().b1());
                 radio
                     .pcnf0
                     .modify(|_, w| unsafe { w.plen()._16bit().cilen().bits(0).termlen().bits(0) });
             }
-            BlePHY::CodedS2 => {
+            BlePhy::CodedS2 => {
                 radio.mode.write(|w| w.mode().ble_lr500kbit());
                 radio.modecnf0.write(|w| w.ru().default().dtx().center());
                 radio.pcnf0.modify(|_, w| unsafe {
                     w.plen().long_range().cilen().bits(2).termlen().bits(3)
                 });
             }
-            BlePHY::CodedS8 => {
+            BlePhy::CodedS8 => {
                 radio.mode.write(|w| w.mode().ble_lr125kbit());
                 radio.modecnf0.write(|w| w.ru().default().dtx().center());
                 radio.pcnf0.modify(|_, w| unsafe {
@@ -708,10 +708,10 @@ impl JamBLErHal for Nrf52840JamBLEr {
         // return it
         // Always return some, we have configured the radio to only receive interrupts on packet reception.
         Some(HalHarvestedPacket {
-            crc_ok: crc_ok,
+            crc_ok,
             crc_init: reverse_calculated_crc_init,
             rssi,
-            first_header_byte: first_header_byte,
+            first_header_byte,
             second_header_byte: payload_len,
         })
 
@@ -726,7 +726,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
     fn harvest_packets_quick_config(
         &mut self,
         access_address: u32,
-        phy: BlePHY,
+        phy: BlePhy,
         channel: u8,
         crc_init: Option<u32>,
         master_pdu_buffer: &mut Box<PDU>,
@@ -752,7 +752,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
         //rprintln!("Packetpointer set in harvest config: 0x{:08X}", ptr);
 
         // Set the frequency to the channel
-        let freq = Nrf52840JamBLEr::channel_to_frequency_register_value(channel);
+        let freq = Nrf52840Jambler::channel_to_frequency_register_value(channel);
         radio
             .frequency
             .write(|w| unsafe { w.frequency().bits(freq) });
@@ -771,7 +771,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
         radio.crccnf.write(|w| w.len().three().skipaddr().skip());
         radio
             .crcpoly
-            .write(|w| unsafe { w.crcpoly().bits(0b00000001_00000000_00000110_01011011) });
+            .write(|w| unsafe { w.crcpoly().bits(0b0000_0001_0000_0000_0000_0110_0101_1011) });
 
         // Set datawhitening seed
         radio
@@ -810,25 +810,25 @@ impl JamBLErHal for Nrf52840JamBLEr {
         // PHY dependend
         // Set the PHY mode and the corresponding preamble and cilen and termlen
         match phy {
-            BlePHY::Uncoded1M => {
+            BlePhy::Uncoded1M => {
                 radio.mode.write(|w| w.mode().ble_1mbit());
                 radio
                     .pcnf0
                     .modify(|_, w| unsafe { w.plen()._8bit().cilen().bits(0).termlen().bits(0) });
             }
-            BlePHY::Uncoded2M => {
+            BlePhy::Uncoded2M => {
                 radio.mode.write(|w| w.mode().ble_2mbit());
                 radio
                     .pcnf0
                     .modify(|_, w| unsafe { w.plen()._16bit().cilen().bits(0).termlen().bits(0) });
             }
-            BlePHY::CodedS2 => {
+            BlePhy::CodedS2 => {
                 radio.mode.write(|w| w.mode().ble_lr500kbit());
                 radio.pcnf0.modify(|_, w| unsafe {
                     w.plen().long_range().cilen().bits(2).termlen().bits(3)
                 });
             }
-            BlePHY::CodedS8 => {
+            BlePhy::CodedS8 => {
                 radio.mode.write(|w| w.mode().ble_lr125kbit());
                 radio.pcnf0.modify(|_, w| unsafe {
                     w.plen().long_range().cilen().bits(2).termlen().bits(3)
@@ -870,10 +870,10 @@ impl JamBLErHal for Nrf52840JamBLEr {
     #[inline]
     fn harvest_packets_busy_wait_slave_response(
         &mut self,
-        slave_phy: BlePHY,
+        slave_phy: BlePhy,
         master_pdu_buffer: &mut Box<PDU>,
         slave_pdu_buffer: &mut Box<PDU>,
-    ) -> Option<((u32, i8), Option<(u32, i8)>)> {
+    ) -> PossiblePackets {
         // TODO if interrupt on address match, wait for end
         // We matched on the address, wait for address match
         while !self.radio_peripheral.events_end.read().events_end().bits() {}
@@ -894,19 +894,19 @@ impl JamBLErHal for Nrf52840JamBLEr {
 
         // change PHY (decision point is ramp up I guess, use fast ramp up 40 micros, default is 140 micros is too slow)
         match slave_phy {
-            BlePHY::Uncoded1M => {
+            BlePhy::Uncoded1M => {
                 self.radio_peripheral.mode.write(|w| w.mode().ble_1mbit());
                 self.radio_peripheral
                     .pcnf0
                     .modify(|_, w| unsafe { w.plen()._8bit().cilen().bits(0).termlen().bits(0) });
             }
-            BlePHY::Uncoded2M => {
+            BlePhy::Uncoded2M => {
                 self.radio_peripheral.mode.write(|w| w.mode().ble_2mbit());
                 self.radio_peripheral
                     .pcnf0
                     .modify(|_, w| unsafe { w.plen()._16bit().cilen().bits(0).termlen().bits(0) });
             }
-            BlePHY::CodedS2 => {
+            BlePhy::CodedS2 => {
                 self.radio_peripheral
                     .mode
                     .write(|w| w.mode().ble_lr500kbit());
@@ -914,7 +914,7 @@ impl JamBLErHal for Nrf52840JamBLEr {
                     w.plen().long_range().cilen().bits(2).termlen().bits(3)
                 });
             }
-            BlePHY::CodedS8 => {
+            BlePhy::CodedS8 => {
                 self.radio_peripheral
                     .mode
                     .write(|w| w.mode().ble_lr125kbit());
@@ -1111,7 +1111,7 @@ pub fn reverse_calculate_crc_init(received_crc_value: u32, pdu: &[u8], pdu_lengt
         ret |= ((state >> i) & 1) << (23 - i);
     }
 
-    return ret;
+    ret
 }
 
 pub fn calculate_crc(crc_init: u32, pdu: &[u8], pdu_length: u16) -> u32 {
@@ -1131,7 +1131,7 @@ pub fn calculate_crc(crc_init: u32, pdu: &[u8], pdu_length: u16) -> u32 {
             // Pop position 23 x^24
             let old_position_23: u8 = (state & 1) as u8;
             // Shift the register to the right
-            state = state >> 1;
+            state >>= 1;
             // Get the data in bit
             let data_in = (current_byte >> bit_position) & 1;
             // calculate x^24 = new position 0 and put it in 24th bit
@@ -1152,7 +1152,7 @@ pub fn calculate_crc(crc_init: u32, pdu: &[u8], pdu_length: u16) -> u32 {
     //	ret |= ((state >> i) & 1) << (23 - i);
     //}
 
-    return reverse_bits_u32(state) >> 8;
+    reverse_bits_u32(state) >> 8
 }
 
 pub fn reverse_bits(byte: u8) -> u8 {
@@ -1160,12 +1160,12 @@ pub fn reverse_bits(byte: u8) -> u8 {
     // Go right to left over original byte, building and shifting the reversed one in the process
     for bit_index in 0..8 {
         // Move to left to make room for new bit on the right (new LSB)
-        reversed_byte = reversed_byte << 1;
+        reversed_byte <<= 1;
         // If byte is 1 in its indexed place, set 1 to right/LSB reversed
         if byte & (1 << bit_index) != 0 {
-            reversed_byte = reversed_byte | 0b0000_0001;
+            reversed_byte |= 0b0000_0001;
         } else {
-            reversed_byte = reversed_byte | 0b0000_0000;
+            reversed_byte |= 0b0000_0000;
         }
         //reversed_byte |= if byte & (1 << bit_index) != 0 {0b0000_0001} else {0b0000_0000};
     }
@@ -1177,12 +1177,12 @@ pub fn reverse_bits_u32(byte: u32) -> u32 {
     // Go right to left over original byte, building and shifting the reversed one in the process
     for bit_index in 0..32 {
         // Move to left to make room for new bit on the right (new LSB)
-        reversed_byte = reversed_byte << 1;
+        reversed_byte <<= 1;
         // If byte is 1 in its indexed place, set 1 to right/LSB reversed
         if byte & (1 << bit_index) != 0 {
-            reversed_byte = reversed_byte | 0b0000_0001;
+            reversed_byte |= 0b0000_0001;
         } else {
-            reversed_byte = reversed_byte | 0b0000_0000;
+            reversed_byte |= 0b0000_0000;
         }
         //reversed_byte |= if byte & (1 << bit_index) != 0 {0b0000_0001} else {0b0000_0000};
     }
@@ -1205,7 +1205,7 @@ fn dewithen_16_bit_pdu_header(first_byte: u8, second_byte: u8, channel: u8) -> (
     for byte in pdu.iter_mut() {
         for bit_index in 0..8 {
             // Get data out from xor 6th = rightmost bit and data in
-            let x7: bool = (linear_feedback_shift_register & 0b0000_00001) == 0b0000_0001;
+            let x7: bool = (linear_feedback_shift_register & 0b0000_0001) == 0b0000_0001;
 
             if x7 {
                 // bit index has to be xored with 1
@@ -1214,7 +1214,7 @@ fn dewithen_16_bit_pdu_header(first_byte: u8, second_byte: u8, channel: u8) -> (
             }
 
             // shift register next shift and operation
-            linear_feedback_shift_register = linear_feedback_shift_register >> 1;
+            linear_feedback_shift_register >>= 1;
             // If the bit that will be shifted out was one, the XOR and shift will matter
             if x7 {
                 // x1 to postion 0 will be 1
@@ -1223,10 +1223,10 @@ fn dewithen_16_bit_pdu_header(first_byte: u8, second_byte: u8, channel: u8) -> (
                 // If position 4 is 1, it will have to be set to 0 because it will be 1 xored with 1. If 0 it will be one because 0 xored with 1
                 if (linear_feedback_shift_register & 0b0000_0100) == 0b0000_0100 {
                     // 1 XOR 1, set it to 0
-                    linear_feedback_shift_register = linear_feedback_shift_register & 0b1111_1011;
+                    linear_feedback_shift_register &= 0b1111_1011;
                 } else {
                     //now 0 in it but xor with 1, set to 1
-                    linear_feedback_shift_register = linear_feedback_shift_register | 0b0000_0100;
+                    linear_feedback_shift_register |= 0b0000_0100;
                 }
             }
         }
@@ -1239,7 +1239,7 @@ fn dewithen_16_bit_pdu_header(first_byte: u8, second_byte: u8, channel: u8) -> (
 /// Should be easy to put it al in one loop an reuse current bit mask en previous was 1
 /// For now like this to not introduce bugs early for no reason.
 #[inline]
-fn is_valid_aa(aa: u32, phy: BlePHY) -> bool {
+fn is_valid_aa(aa: u32, phy: BlePhy) -> bool {
 
     // not more then 6 consecutive 0s
     let mut zero_count = 0;
@@ -1324,14 +1324,12 @@ fn is_valid_aa(aa: u32, phy: BlePHY) -> bool {
 
     // EXTRA FOR CODED PHY
     match phy {
-        BlePHY::CodedS2 | BlePHY::CodedS8 => {
+        BlePhy::CodedS2 | BlePhy::CodedS8 => {
             // Shal have at least 3 ones in the least significant 8 bits
             let mut ones = 0;
             for bit_index in 0..32 {
-                if bit_index < 8 {
-                    if (aa & (0b1 << bit_index)) != 0 {
-                        ones += 1;
-                    }
+                if bit_index < 8 && (aa & (0b1 << bit_index)) != 0 {
+                    ones += 1;
                 }
             }
             if ones < 3 {

@@ -1,13 +1,13 @@
 pub mod nrf52840;
 
-use super::BlePHY;
+use super::BlePhy;
 use super::{PDU};
 use heapless::{
     pool::singleton::{Box},
 };
 
 #[derive(Debug, Clone)]
-pub enum JamBLErHalError {
+pub enum JamblerHalError {
     SetAccessAddressError,
     InvalidChannel(u8),
 }
@@ -17,7 +17,7 @@ pub enum JamBLErHalError {
 /// Reset can be called at any point.
 ///
 /// ANY FUNCTION HERE SHOULD BE INLINED IN IMPLEMENTATION!
-pub trait JamBLErHal {
+pub trait JamblerHal {
     /// Start sending with the current configuration.
     /// Radio should be configure before this.
     /// Should be called shortly after config and fire up very fast, so any speedup achieved by making the radio more ready but consume more power should already running.
@@ -48,7 +48,7 @@ pub trait JamBLErHal {
 
     /// Should get the radio ready for listening on the given phy and channel
     /// This config is special because many chips require hacks and cannot sniff every possible packet normally by listening.
-    fn config_discover_access_addresses(&mut self, phy: BlePHY, channel: u8);
+    fn config_discover_access_addresses(&mut self, phy: BlePhy, channel: u8);
 
     /// Reads the access address from the receive buffer of you chip.
     /// Might be hacky for certain chips.
@@ -62,7 +62,7 @@ pub trait JamBLErHal {
     fn config_harvest_packets(
         &mut self,
         access_address: u32,
-        phy: BlePHY,
+        phy: BlePhy,
         channel: u8,
         crc_init: Option<u32>,
     );
@@ -77,7 +77,7 @@ pub trait JamBLErHal {
     fn harvest_packets_quick_config(
         &mut self,
         access_address: u32,
-        phy: BlePHY,
+        phy: BlePhy,
         channel: u8,
         crc_init: Option<u32>,
         master_pdu_buffer: &mut Box<PDU>,
@@ -90,11 +90,13 @@ pub trait JamBLErHal {
     /// The slave packets has to be copied to the slave pdu buffer.
     fn harvest_packets_busy_wait_slave_response(
         &mut self,
-        slave_phy: BlePHY,
+        slave_phy: BlePhy,
         master_pdu_buffer: &mut Box<PDU>,
         slave_pdu_buffer: &mut Box<PDU>,
-    ) -> Option<((u32, i8), Option<(u32, i8)>)>;
+    ) -> PossiblePackets;
 }
+
+pub type PossiblePackets = Option<((u32, i8), Option<(u32, i8)>)>;
 
 /// Return information when requested to harvest packets.
 #[derive(Debug)]
@@ -113,7 +115,7 @@ pub struct HalHarvestedPacket {
 /// A long term timer.
 /// Should be accurate up until a microseconds and last for more than the lifetime of a human (= u64 wraparound counter).
 /// TODO callback for correcting for a number of microseconds (BLE slave anchor point synchronisation, clock synchronisation over I2C).
-pub trait JamBLErTimer {
+pub trait JamblerTimer {
     /// Starts the timer
     fn start(&mut self);
 
@@ -130,7 +132,7 @@ pub trait JamBLErTimer {
 
     fn get_drift_percentage(&mut self) -> f64 {
         // ppm stands for parts per million, so divide by 1 million.
-        self.get_ppm() as f64 / 1000000 as f64
+        self.get_ppm() as f64 / 1000000_f64
     }
 
     /// Gets the maximum amount of time before overflow in seconds, rounded down.
@@ -145,7 +147,7 @@ pub trait JamBLErTimer {
 
 /// A timer which should generate an interrupt on its given interval.
 /// ANY FUNCTION HERE SHOULD BE INLINED IN IMPLEMENTATION!
-pub trait JamBLErIntervalTimer {
+pub trait JamblerIntervalTimer {
     /// Sets the interval in microseconds and if the timer should function as a countdown or as a periodic timer.
     /// Returns false if the interval is too long for the timer.
     fn config(&mut self, interval: u32, periodic: bool) -> bool;

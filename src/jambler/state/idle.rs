@@ -1,8 +1,8 @@
-use super::super::JamBLErHal;
+use super::super::JamblerHal;
 use super::JammerState;
 use super::StateParameters;
 use super::StateReturn;
-use crate::jambler::JamBLErState;
+use crate::jambler::JamblerState;
 
 pub struct Idle {}
 
@@ -11,23 +11,23 @@ impl JammerState for Idle {
         Idle {}
     }
 
-    fn config(&mut self, radio: &mut impl JamBLErHal, parameters: &mut StateParameters) {}
+    fn config(&mut self, radio: &mut impl JamblerHal, parameters: &mut StateParameters) {}
 
     fn initialise(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
     }
 
-    fn launch(&mut self, radio: &mut impl JamBLErHal, parameters: &mut StateParameters) {
+    fn launch(&mut self, radio: &mut impl JamblerHal, parameters: &mut StateParameters) {
         // TODO put radio to sleep? poweroff?
     }
 
     fn update_state(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -41,7 +41,7 @@ impl JammerState for Idle {
 
     fn handle_radio_interrupt(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -51,7 +51,7 @@ impl JammerState for Idle {
 
     fn handle_interval_timer_interrupt(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -60,22 +60,17 @@ impl JammerState for Idle {
     }
 
     /// Can transition to Idle from any state
-    fn is_valid_transition_from(&mut self, old_state: &JamBLErState) {
-        match old_state {
-            _ => {
-                // can come here from all states
-            }
-        }
+    fn is_valid_transition_from(&mut self, old_state: &JamblerState) {
     }
 
     /// Should only be ok for start states.
     #[allow(unreachable_patterns)]
-    fn is_valid_transition_to(&mut self, new_state: &JamBLErState) {
+    fn is_valid_transition_to(&mut self, new_state: &JamblerState) {
         match new_state {
-            JamBLErState::Idle
-            | JamBLErState::DiscoveringAAs
-            | JamBLErState::CalibrateIntervalTimer
-            | JamBLErState::HarvestingPackets => {}
+            JamblerState::Idle
+            | JamblerState::DiscoveringAAs
+            | JamblerState::CalibrateIntervalTimer
+            | JamblerState::HarvestingPackets => {}
             _ => panic!("Idle to a non-start state."),
         }
     }

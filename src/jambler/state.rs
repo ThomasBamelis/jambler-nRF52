@@ -8,8 +8,8 @@ pub mod idle;
 use crate::jambler::state::harvest_packets::HarvestedSubEvent;
 use heapless::{consts::*, Vec};
 
-use super::JamBLErHalError;
-use super::{BlePHY, JamBLErHal, JamBLErState};
+use super::JamblerHalError;
+use super::{BlePhy, JamblerHal, JamblerState};
 
 
 /// Errors a state can give.
@@ -18,19 +18,19 @@ pub enum StateError {
     InvalidStateTransition(&'static str),
     InvalidConfig(&'static str),
     MissingConfig(&'static str),
-    JamBLErHalError(&'static str, JamBLErHalError),
+    JamblerHalError(&'static str, JamblerHalError),
 }
 
-impl core::convert::From<super::hardware_traits::JamBLErHalError> for StateError {
-    fn from(jambler_hal_error: super::hardware_traits::JamBLErHalError) -> StateError {
-        return StateError::JamBLErHalError("HAL error was given: ", jambler_hal_error);
+impl core::convert::From<super::hardware_traits::JamblerHalError> for StateError {
+    fn from(jambler_hal_error: super::hardware_traits::JamblerHalError) -> StateError {
+        StateError::JamblerHalError("HAL error was given: ", jambler_hal_error)
     }
 }
 
 /// Possible parameters a state might need to configure itself.
 #[derive(Debug)]
 pub struct StateConfig {
-    pub phy: Option<BlePHY>,
+    pub phy: Option<BlePhy>,
     pub access_address: Option<u32>,
     pub channel_map: Option<[bool; 37]>,
     pub crc_init: Option<u32>,
@@ -40,7 +40,7 @@ pub struct StateConfig {
     pub hop_increment: Option<u32>,
     pub initial_counter_value: Option<u32>,
     pub counter: Option<u32>,
-    pub previous_state: Option<JamBLErState>,
+    pub previous_state: Option<JamblerState>,
     /// When it is needed to iterate through a bunch of channels.
     /// Can have 64 unsigned 8-bit integers, although it only needs 37.
     /// For a Queue, they say you get better performance if the size is a
@@ -55,13 +55,13 @@ pub struct StateConfig {
     /// The clock drift in ppm of the long term timer, which provides the current_time timestamp.
     pub long_term_timer_ppm: Option<u32>,
     /// The phy of the slave
-    pub slave_phy: Option<BlePHY>,
+    pub slave_phy: Option<BlePhy>,
 }
 
 impl StateConfig {
     /// Default constructor for quickly initialising a config
     /// without any parameters.
-    pub fn new<'a>() -> StateConfig {
+    pub fn new() -> StateConfig {
         StateConfig {
             phy: None,
             access_address: None,
@@ -81,6 +81,12 @@ impl StateConfig {
             long_term_timer_ppm: None,
             slave_phy: None,
         }
+    }
+}
+
+impl Default for StateConfig {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -109,7 +115,7 @@ pub struct DiscoveredAccessAddress {
     /// The access address.
     address: u32,
     /// The phy on which the AA was discovered.
-    phy: BlePHY,
+    phy: BlePhy,
     /// The channel on which the AA was discovered.
     channel: u8,
     /// The time at which the AA was discovered.
@@ -143,7 +149,7 @@ pub enum StateMessage {
     /// harvested subevents or unused channels follow.
     /// This is sent every time the harvested packet state is started
     /// Holds the access address for the next connection and the master and slave phy
-    ResetDeducingConnectionParameters(u32, BlePHY, BlePHY),
+    ResetDeducingConnectionParameters(u32, BlePhy, BlePhy),
 }
 
 /// Struct for letting a state return something
@@ -151,7 +157,7 @@ pub enum StateMessage {
 /// Return string was completely removed, the state/master main should do user output
 pub struct StateReturn {
     pub timing_requirements: Option<IntervalTimerRequirements>,
-    pub state_transition: Option<(JamBLErState, Option<StateConfig>)>,
+    pub state_transition: Option<(JamblerState, Option<StateConfig>)>,
     pub state_message: Option<StateMessage>,
 }
 
@@ -264,19 +270,19 @@ pub trait JammerState {
     fn new() -> Self;
 
     /// Returns an error if a required config parameter was missing.
-    fn config(&mut self, radio: &mut impl JamBLErHal, parameters: &mut StateParameters);
+    fn config(&mut self, radio: &mut impl JamblerHal, parameters: &mut StateParameters);
 
     /// Functions as a reset + start!
     /// Every state should have a config method which you should call before this one.
     /// Should always return timing.
     fn initialise(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     );
 
-    fn launch(&mut self, radio: &mut impl JamBLErHal, parameters: &mut StateParameters);
+    fn launch(&mut self, radio: &mut impl JamblerHal, parameters: &mut StateParameters);
 
     /// Used for updating the state.
     /// For example, updating the connInterval while sniffing for packets,
@@ -284,7 +290,7 @@ pub trait JammerState {
     /// Returns an error if you provided an illegal parameter.
     fn update_state(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     );
@@ -297,7 +303,7 @@ pub trait JammerState {
     /// ALWAYS INLINE IN IMPLEMENTATION!
     fn handle_radio_interrupt(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     );
@@ -306,7 +312,7 @@ pub trait JammerState {
     /// ALWAYS INLINE IN IMPLEMENTATION!
     fn handle_interval_timer_interrupt(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     );
@@ -316,12 +322,12 @@ pub trait JammerState {
     /// Panics on invalid transition
     /// TODO these checks should be deleted when you are sure everything works
     /// SHOULD PANIC ON INVALID TRANSITION
-    fn is_valid_transition_to(&mut self, new_state: &JamBLErState);
+    fn is_valid_transition_to(&mut self, new_state: &JamblerState);
 
     /// Is it valid to go to the self state from the old_state
     /// new_state -> self valid?
     /// SHOULD PANIC ON INVALID TRANSITION
-    fn is_valid_transition_from(&mut self, old_state: &JamBLErState);
+    fn is_valid_transition_from(&mut self, old_state: &JamblerState);
 }
 
 /// Will hold a struct of every possible state.
@@ -329,7 +335,7 @@ pub trait JammerState {
 /// and use the state GOF pattern.
 /// It will have a function that will return a reference to the right jammerstate implementation given the corresponding JamBLErState enum.
 pub struct StateStore {
-    current_state: JamBLErState,
+    current_state: JamblerState,
     idle: idle::Idle,
     discover_aas: discover_aas::DiscoverAas,
     harvest_packets: harvest_packets::HarvestPackets,
@@ -352,7 +358,7 @@ macro_rules! transistion_to {
 impl StateStore {
     pub fn new() -> StateStore {
         StateStore {
-            current_state: JamBLErState::Idle,
+            current_state: JamblerState::Idle,
             idle: idle::Idle::new(),
             discover_aas: discover_aas::DiscoverAas::new(),
             harvest_packets: harvest_packets::HarvestPackets::new(),
@@ -360,7 +366,7 @@ impl StateStore {
         }
     }
 
-    pub fn get_current_state(&self) -> JamBLErState {
+    pub fn get_current_state(&self) -> JamblerState {
         self.current_state.clone()
     }
 
@@ -370,8 +376,8 @@ impl StateStore {
     /// Calibrate interval timer should always be last
     pub fn state_transition(
         &mut self,
-        radio: &mut impl JamBLErHal,
-        new_state: &JamBLErState,
+        radio: &mut impl JamblerHal,
+        new_state: &JamblerState,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -385,7 +391,7 @@ impl StateStore {
         // Check if old -> new is valid for old and stop if if ok
         // The ? will make the function return early.
         match self.current_state {
-            JamBLErState::Idle => {
+            JamblerState::Idle => {
                 let state = &mut self.idle;
 
                 // This is identical for every case
@@ -393,19 +399,19 @@ impl StateStore {
                 // THESE ARE THE PARAMETERS FOR THE NEW STATE
                 state.stop(parameters);
             }
-            JamBLErState::DiscoveringAAs => {
+            JamblerState::DiscoveringAAs => {
                 let state = &mut self.discover_aas;
 
                 state.is_valid_transition_to(&new_state);
                 state.stop(parameters);
             }
-            JamBLErState::HarvestingPackets => {
+            JamblerState::HarvestingPackets => {
                 let state = &mut self.harvest_packets;
 
                 state.is_valid_transition_to(&new_state);
                 state.stop(parameters);
             }
-            JamBLErState::CalibrateIntervalTimer => {
+            JamblerState::CalibrateIntervalTimer => {
                 let state = &mut self.calibrate_interval_timer;
 
                 state.is_valid_transition_to(&new_state);
@@ -417,7 +423,7 @@ impl StateStore {
         // configure the state, initialise it, get its timing requirements
         // and launch it.
         match &new_state {
-            JamBLErState::Idle => {
+            JamblerState::Idle => {
                 let state = &mut self.idle;
 
                 // This is identical for every case
@@ -426,7 +432,7 @@ impl StateStore {
                 state.initialise(radio, parameters, return_value);
                 state.launch(radio, parameters);
             }
-            JamBLErState::DiscoveringAAs => {
+            JamblerState::DiscoveringAAs => {
                 let state = &mut self.discover_aas;
 
                 state.is_valid_transition_from(&self.current_state);
@@ -434,7 +440,7 @@ impl StateStore {
                 state.initialise(radio, parameters, return_value);
                 state.launch(radio, parameters);
             }
-            JamBLErState::HarvestingPackets => {
+            JamblerState::HarvestingPackets => {
                 let state = &mut self.harvest_packets;
 
                 state.is_valid_transition_from(&self.current_state);
@@ -442,7 +448,7 @@ impl StateStore {
                 state.initialise(radio, parameters, return_value);
                 state.launch(radio, parameters);
             }
-            JamBLErState::CalibrateIntervalTimer => {
+            JamblerState::CalibrateIntervalTimer => {
                 let state = &mut self.calibrate_interval_timer;
 
                 state.is_valid_transition_from(&self.current_state);
@@ -462,27 +468,27 @@ impl StateStore {
     #[inline]
     pub fn update_state(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
         match &mut self.current_state {
-            JamBLErState::Idle => {
+            JamblerState::Idle => {
                 let state = &mut self.idle;
 
                 state.update_state(radio, parameters, return_value)
             }
-            JamBLErState::DiscoveringAAs => {
+            JamblerState::DiscoveringAAs => {
                 let state = &mut self.discover_aas;
 
                 state.update_state(radio, parameters, return_value)
             }
-            JamBLErState::HarvestingPackets => {
+            JamblerState::HarvestingPackets => {
                 let state = &mut self.harvest_packets;
 
                 state.update_state(radio, parameters, return_value)
             }
-            JamBLErState::CalibrateIntervalTimer => {
+            JamblerState::CalibrateIntervalTimer => {
                 let state = &mut self.calibrate_interval_timer;
 
                 state.update_state(radio, parameters, return_value)
@@ -494,28 +500,28 @@ impl StateStore {
     #[inline]
     pub fn handle_radio_interrupt(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
         match self.current_state {
-            JamBLErState::Idle => {
+            JamblerState::Idle => {
                 let state = &mut self.idle;
 
                 // Following is same for every case
                 state.handle_radio_interrupt(radio, parameters, return_value)
             }
-            JamBLErState::DiscoveringAAs => {
+            JamblerState::DiscoveringAAs => {
                 let state = &mut self.discover_aas;
 
                 state.handle_radio_interrupt(radio, parameters, return_value)
             }
-            JamBLErState::HarvestingPackets => {
+            JamblerState::HarvestingPackets => {
                 let state = &mut self.harvest_packets;
 
                 state.handle_radio_interrupt(radio, parameters, return_value)
             }
-            JamBLErState::CalibrateIntervalTimer => {
+            JamblerState::CalibrateIntervalTimer => {
                 let state = &mut self.calibrate_interval_timer;
 
                 state.handle_radio_interrupt(radio, parameters, return_value)
@@ -527,28 +533,28 @@ impl StateStore {
     #[inline]
     pub fn handle_interval_timer_interrupt(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
         match self.current_state {
-            JamBLErState::Idle => {
+            JamblerState::Idle => {
                 let state = &mut self.idle;
 
                 // Following is same for every case
                 state.handle_interval_timer_interrupt(radio, parameters, return_value)
             }
-            JamBLErState::DiscoveringAAs => {
+            JamblerState::DiscoveringAAs => {
                 let state = &mut self.discover_aas;
 
                 state.handle_interval_timer_interrupt(radio, parameters, return_value)
             }
-            JamBLErState::HarvestingPackets => {
+            JamblerState::HarvestingPackets => {
                 let state = &mut self.harvest_packets;
 
                 state.handle_interval_timer_interrupt(radio, parameters, return_value)
             }
-            JamBLErState::CalibrateIntervalTimer => {
+            JamblerState::CalibrateIntervalTimer => {
                 let state = &mut self.calibrate_interval_timer;
 
                 state.handle_interval_timer_interrupt(radio, parameters, return_value)

@@ -74,14 +74,14 @@ impl SerialController {
         // then set the connect to connected
         // This has to be done before enabling the module.
         device.psel.rxd.write(|w| {
-            unsafe { w.bits(13 as u32) };
+            unsafe { w.bits(13_u32) };
             w.connect().connected()
         });
 
         // see 6.33.2, txd has to be high
         pins_ctrl.txd.set_high().unwrap();
         device.psel.txd.write(|w| {
-            unsafe { w.bits(15 as u32) };
+            unsafe { w.bits(15_u32) };
             w.connect().connected()
         });
 
@@ -137,7 +137,7 @@ impl SerialController {
     /// Has to be called exactly once to start listening.
     /// Maybe I should split this up in a public one which can only be called once.
     #[inline]
-    pub fn start_listening(&mut self) -> () {
+    pub fn start_listening(&mut self) {
         compiler_fence(SeqCst);
 
         // Set up the DMA read pointer
@@ -150,7 +150,7 @@ impl SerialController {
         self.uarte1_peripheral
             .rxd
             .maxcnt
-            .write(|w| unsafe { w.maxcnt().bits(1 as _) });
+            .write(|w| unsafe { w.maxcnt().bits(1_u16) });
 
         // Start UARTE Receive transaction.
         self.uarte1_peripheral.tasks_startrx.write(|w|
@@ -182,7 +182,7 @@ impl SerialController {
             self.uarte1_peripheral.events_endrx.reset();
 
             // read volatile from the rx buffer
-            let last_received_byte: u8 = unsafe { read_volatile(&mut self.rx_byte[0]) };
+            let last_received_byte: u8 = unsafe { read_volatile(&self.rx_byte[0]) };
             // TODO Bug: first byte received is alwas \0
 
             compiler_fence(SeqCst);
@@ -227,7 +227,7 @@ impl SerialController {
 
     /// Initialises the radio so that it will start to receive a task
     /// and return a task once it has received the splitter character.
-    pub fn init_receive_string(&mut self) -> () {
+    pub fn init_receive_string(&mut self) {
         // set it so receivements are handled in the interrupt handler
         self.receiving = true;
         // reset whatever you may have received up until now.
@@ -278,7 +278,7 @@ impl SerialController {
     /// If the string does not fit in the tx buffer,
     /// a message is sent over rtt and the string is not sent.
     /// Could be unsafe to use when it can interleave with the interrupt handler, because it alters the send queue used by the handler.
-    pub fn send_string(&mut self, s: String<U256>) -> () {
+    pub fn send_string(&mut self, s: String<U256>) {
         // this can break with utf8
         // Add all bytes of the string to the output buffer.
         let bytes = s.into_bytes();
@@ -317,7 +317,7 @@ impl SerialController {
     /// It will send a new byte from the queue until the queue is empty.
     /// It will then stop the tx and set sending to false, so it does not accidentally get called in the interrupt handler.
     #[inline]
-    fn sending_string(&mut self) -> () {
+    fn sending_string(&mut self) {
         match self.send_buffer.dequeue() {
             Some(byte) => {
                 if !self.sending {
@@ -352,7 +352,7 @@ impl SerialController {
                 self.uarte1_peripheral
                     .txd
                     .maxcnt
-                    .write(|w| unsafe { w.maxcnt().bits(1 as _) });
+                    .write(|w| unsafe { w.maxcnt().bits(1_u16) });
 
                 // Start UARTE Transmit transaction.
                 self.uarte1_peripheral.tasks_starttx.write(|w|

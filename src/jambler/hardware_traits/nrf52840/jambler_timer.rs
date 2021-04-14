@@ -1,7 +1,7 @@
 use hal::pac::TIMER2;
 use nrf52840_hal as hal; // Embedded_hal implementation for my chip
 
-use super::super::JamBLErTimer;
+use super::super::JamblerTimer;
 use core::sync::atomic::{compiler_fence, Ordering::SeqCst};
 
 /// A struct for using a timer on the nrf for ble.
@@ -34,7 +34,7 @@ impl Nrf52840Timer {
     //}
 }
 
-impl JamBLErTimer for Nrf52840Timer {
+impl JamblerTimer for Nrf52840Timer {
     #[inline(always)]
     fn start(&mut self) {
         // *** reset ***
@@ -89,7 +89,7 @@ impl JamBLErTimer for Nrf52840Timer {
         let ticks_per_micro_second: u64 = 1;
         //TODO reset to 0xFFFFFFFF 0x000F4240
         let ms_from_wrap_around: u64 =
-            self.nb_times_wrapped as u64 * 0xFFFFFFFF as u64 * ticks_per_micro_second; // u32 * u32 * 1 should fit in u64
+            self.nb_times_wrapped as u64 * 0xFFFFFFFF_u64 * ticks_per_micro_second; // u32 * u32 * 1 should fit in u64
         let ms_from_this_cycle: u64 = current_ticks as u64 * ticks_per_micro_second;
 
         ms_from_this_cycle + ms_from_wrap_around // will overflow when I am dead

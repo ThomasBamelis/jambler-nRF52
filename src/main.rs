@@ -6,18 +6,18 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
-use crate::jambler::BlePHY;
+use crate::jambler::BlePhy;
 use crate::jambler::ConnectionSample;
 use crate::jambler::ConnectionSamplePacket;
-use crate::jambler::JamBLErReturn;
+use crate::jambler::JamblerReturn;
 use nrf52840_hal as hal; // Embedded_hal implementation for my chip
                          //use panic_halt as _; // Halts on panic. You can put a breakpoint on `rust_begin_unwind` to catch panics.
                          // TODO change panic behaviour to turn on led on board, so we can spot it with multiple leds
 use rtt_target::{rprintln, rtt_init_print}; // for logging to rtt
 
 mod jambler;
-use crate::jambler::nrf52840::{Nrf52840IntervalTimer, Nrf52840JamBLEr, Nrf52840Timer};
-use crate::jambler::{JamBLEr, JamBLErTask};
+use crate::jambler::nrf52840::{Nrf52840IntervalTimer, Nrf52840Jambler, Nrf52840Timer};
+use crate::jambler::{Jambler, JamblerTask};
 
 use crate::jambler::deduce_connection_parameters::{reverse_calculate_crc_init, DeduceConnectionParametersControl, DeductionState, CounterInterval};
 
@@ -72,7 +72,7 @@ const APP: () = {
         /// This struct contains the "control registers" for the task.
         dcp_control: DeduceConnectionParametersControl,
         uarte: SerialController,
-        jambler: JamBLEr<Nrf52840JamBLEr, Nrf52840Timer, Nrf52840IntervalTimer>,
+        jambler: Jambler<Nrf52840Jambler, Nrf52840Timer, Nrf52840IntervalTimer>,
     }
 
     /// Initialises the application using late resources.
@@ -138,13 +138,13 @@ const APP: () = {
 
         // setup jammer
         let radio: hal::pac::RADIO = ctx.device.RADIO;
-        let nrf_jambler = Nrf52840JamBLEr::new(radio);
+        let nrf_jambler = Nrf52840Jambler::new(radio);
         let timer_per: hal::pac::TIMER2 = ctx.device.TIMER2;
         let nrf_timer = Nrf52840Timer::new(timer_per);
         let interval_timer_per: hal::pac::TIMER1 = ctx.device.TIMER1;
         let interval_nrf_timer = Nrf52840IntervalTimer::new(interval_timer_per);
 
-        let jambler = JamBLEr::new(nrf_jambler, nrf_timer, interval_nrf_timer);
+        let jambler = Jambler::new(nrf_jambler, nrf_timer, interval_nrf_timer);
 
         // Spawn the late resources initialiser, so any initialisation for which the resources must be in their final memory place can be done there.
         ctx.spawn
@@ -191,7 +191,7 @@ const APP: () = {
     #[task(binds = RADIO ,priority = 7, resources = [jambler], spawn = [handle_jambler_return])]
     fn handle_radio(ctx: handle_radio::Context) {
         // Interpret the resource (compiler comfort)
-        let jambler: &mut JamBLEr<Nrf52840JamBLEr, Nrf52840Timer, Nrf52840IntervalTimer> =
+        let jambler: &mut Jambler<Nrf52840Jambler, Nrf52840Timer, Nrf52840IntervalTimer> =
             ctx.resources.jambler;
 
         // pass the interrupt and spawn the jambler return handler task with it immediately if there is a return value
@@ -270,18 +270,18 @@ const APP: () = {
     #[task(priority = 4, capacity = 5, resources = [jambler, dcp_control], spawn = [rtic_controller, deduce_connection_parameters])]
     fn handle_jambler_return(
         mut ctx: handle_jambler_return::Context,
-        jambler_return: JamBLErReturn,
+        jambler_return: JamblerReturn,
     ) {
         //rprintln!("Handling jambler return value:{}", &jambler_return);
         match jambler_return {
-            JamBLErReturn::InitialisationComplete => {
+            JamblerReturn::InitialisationComplete => {
                 // Go to the next initialisation step, uart in this case for now
                 ctx.spawn
-                    .rtic_controller(RTICControllerAction::NextInitialisationStep(
+                    .rtic_controller(RticControllerAction::NextInitialisationStep(
                         InitialisationSequence::InitialiseUart,
                     )).unwrap();
             }
-            JamBLErReturn::HarvestedSubEvent(harvested_subevent, completed_channel_chain) => {
+            JamblerReturn::HarvestedSubEvent(harvested_subevent, completed_channel_chain) => {
                 // turn the harvested subevent into a small and easily digested connection sample (reversing the crc is way too heavy to do in interrupt handler)
 
                 /*
@@ -383,13 +383,8 @@ const APP: () = {
                 let queue: &mut Queue<ConnectionSample, U32> =
                     &mut ctx.resources.dcp_control.connection_sample_queue;
 
-                match queue.enqueue(connection_sample) {
-                    Err(e) => {
-                        rprintln!("WARNING: connection sample queue flooding, dropping sample.")
-                    }
-                    _ => {
-                        // Everything okay
-                    }
+                if let Err(e) = queue.enqueue(connection_sample) {
+                    rprintln!("WARNING: connection sample queue flooding, dropping sample.")
                 }
 
                 // If the deducer is not yet running, start it
@@ -397,18 +392,13 @@ const APP: () = {
 
                 // TODO do something if you completed channel chain?
             }
-            JamBLErReturn::HarvestedUnusedChannel(channel, completed_channel_chain) => {
+            JamblerReturn::HarvestedUnusedChannel(channel, completed_channel_chain) => {
                 // Push to the queue for the connection parameter deducer
                 let queue: &mut Queue<u8, U32> =
                     &mut ctx.resources.dcp_control.unused_channel_queue;
 
-                match queue.enqueue(channel) {
-                    Err(e) => {
-                        rprintln!("WARNING: unused channel sample queue flooding, dropping sample.")
-                    }
-                    _ => {
-                        // Everything okay
-                    }
+                if let Err(e) = queue.enqueue(channel) {
+                    rprintln!("WARNING: unused channel sample queue flooding, dropping sample.")
                 }
 
                 // If the deducer is not yet running, start it
@@ -416,7 +406,7 @@ const APP: () = {
 
                 // TODO do something if you completed channel chain?
             }
-            JamBLErReturn::ResetDeducingConnectionParameters(
+            JamblerReturn::ResetDeducingConnectionParameters(
                 new_access_address,
                 master_phy,
                 slave_phy,
@@ -433,7 +423,7 @@ const APP: () = {
                 // is running already.
                 ctx.spawn.deduce_connection_parameters().ok();
             }
-            JamBLErReturn::NoReturn => {}
+            JamblerReturn::NoReturn => {}
         }
     }
 
@@ -446,10 +436,10 @@ const APP: () = {
     #[task(priority = 2, resources = [jambler, uarte], spawn = [ initialise_late_resources])]
     fn rtic_controller(
         ctx: rtic_controller::Context,
-        rtic_controller_action: RTICControllerAction,
+        rtic_controller_action: RticControllerAction,
     ) {
         match rtic_controller_action {
-            RTICControllerAction::NextInitialisationStep(next_step) => {
+            RticControllerAction::NextInitialisationStep(next_step) => {
                 ctx.spawn.initialise_late_resources(next_step).unwrap();
             } // TODO a user interrupt
               /*
@@ -517,10 +507,10 @@ const APP: () = {
         match parse_command(command) {
             Some(cli_command) => {
                 match cli_command {
-                    CLICommand::UserInterrupt => {
+                    CliCommand::UserInterrupt => {
                         // TODO configure what happens on user interrupt
                         ctx.resources.jambler.lock(|jambler| {
-                            jambler.execute_task(JamBLErTask::UserInterrupt);
+                            jambler.execute_task(JamblerTask::UserInterrupt);
                         });
 
                         // start listening for next command
@@ -535,7 +525,7 @@ const APP: () = {
                             dev.init_receive_string();
                         });
                     }
-                    CLICommand::JamBLErTask(jambler_task) => {
+                    CliCommand::JamblerTask(jambler_task) => {
                         // propagate jambler command to jambler
                         ctx.resources.jambler.lock(|jambler| {
                             jambler.execute_task(jambler_task);
@@ -597,8 +587,8 @@ const APP: () = {
             if reset {
                 // Reset the control block and get the access address it holds now
                 let mut new_access_address: u32 = 0;
-                let mut master_phy: BlePHY = BlePHY::Uncoded1M;
-                let mut slave_phy: BlePHY = BlePHY::Uncoded1M;
+                let mut master_phy: BlePhy = BlePhy::Uncoded1M;
+                let mut slave_phy: BlePhy = BlePhy::Uncoded1M;
                 ctx.resources.dcp_control.lock(|dcp_control| {
                     let (na, mp, sp) = dcp_control.reset();
                     new_access_address = na;
@@ -699,21 +689,22 @@ enum InitialisationSequence {
 
 /// An enum for letting any task send a message to the controller for changing things.
 #[derive(Debug)]
-enum RTICControllerAction {
+enum RticControllerAction {
     NextInitialisationStep(InitialisationSequence),
 }
 
 /// Process jambler return values
 #[inline]
-fn process_jambler_return(jambler_return: Option<JamBLErReturn>) -> Option<RTICControllerAction> {
+fn process_jambler_return(jambler_return: Option<JamblerReturn>) -> Option<RticControllerAction> {
     if let Some(jr) = jambler_return {
         match jr {
             // If jambler reports his initialisation complete, move on to initialising uart
-            JamBLErReturn::InitialisationComplete => {
-                return Some(RTICControllerAction::NextInitialisationStep(
+            JamblerReturn::InitialisationComplete => {
+                return Some(RticControllerAction::NextInitialisationStep(
                     InitialisationSequence::InitialiseUart,
                 ));
             }
+            JamblerReturn::NoReturn => {},
             _ => {}
         }
     }
@@ -726,8 +717,8 @@ fn process_jambler_return(jambler_return: Option<JamBLErReturn>) -> Option<RTICC
 
 // RTICCommand
 #[derive(Debug)]
-enum CLICommand {
-    JamBLErTask(JamBLErTask),
+enum CliCommand {
+    JamblerTask(JamblerTask),
     UserInterrupt,
 }
 
@@ -760,17 +751,17 @@ fn print_bootup_complete_message(uarte: &mut SerialController) {
 /// Returns Some if the command had a valid syntax.
 /// The command parameters might still be invalid though.
 #[inline]
-fn parse_command(command: String<U256>) -> Option<CLICommand> {
+fn parse_command(command: String<U256>) -> Option<CliCommand> {
     if let Some(rtic_command) = get_split(command.as_str(), ' ', 0) {
         match rtic_command {
-            "INTERRUPT" => Some(CLICommand::UserInterrupt),
-            "discoveraas" => Some(CLICommand::JamBLErTask(JamBLErTask::DiscoverAas)),
+            "INTERRUPT" => Some(CliCommand::UserInterrupt),
+            "discoveraas" => Some(CliCommand::JamblerTask(JamblerTask::DiscoverAas)),
             "jam" => {
                 if let Some(param_1_aa) = get_split(command.as_str(), ' ', 1) {
                     if let Some(u32_value_aa) = hex_str_to_u32(param_1_aa) {
                         rprintln!("Received jam command for u32 addres {}", u32_value_aa);
                         //TODO change to proper command
-                        Some(CLICommand::JamBLErTask(JamBLErTask::Jam))
+                        Some(CliCommand::JamblerTask(JamblerTask::Jam))
                     } else {
                         // 1st param was not hex value
                         None
@@ -875,8 +866,7 @@ fn get_split(command: &str, splitter: char, index: u8) -> Option<&str> {
 fn hex_str_to_u32(s: &str) -> Option<u32> {
     let mut value: u32 = 0;
     // Exponent is the index from right to left
-    let mut exponent = 0;
-    for c in s.chars().rev() {
+    for (exponent, c) in s.chars().rev().enumerate() {
         let factor: u8 = match c {
             '0' => 0,
             '1' => 1,
@@ -902,8 +892,7 @@ fn hex_str_to_u32(s: &str) -> Option<u32> {
         };
 
         // value += factor * 2^(exponent * 4)
-        value = value + ((factor as u32) << (exponent * 4));
-        exponent += 1;
+        value += (factor as u32) << (exponent * 4);
     }
     Some(value)
 }

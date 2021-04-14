@@ -1,10 +1,10 @@
-use super::super::JamBLErHal;
+use super::super::JamblerHal;
 use super::JammerState;
 use super::StateMessage;
 use super::StateParameters;
 use super::StateReturn;
 use crate::jambler::state::IntervalTimerRequirements;
-use crate::jambler::JamBLErState;
+use crate::jambler::JamblerState;
 
 #[derive(Clone)]
 enum CalibrationSequence {
@@ -52,7 +52,7 @@ impl JammerState for CalibrateIntervalTimer {
     }
 
     /// Set the interval
-    fn config(&mut self, radio: &mut impl JamBLErHal, parameters: &mut StateParameters) {
+    fn config(&mut self, radio: &mut impl JamblerHal, parameters: &mut StateParameters) {
         self.interval = parameters
             .config
             .as_ref()
@@ -64,7 +64,7 @@ impl JammerState for CalibrateIntervalTimer {
     /// Ask for the periodic timer
     fn initialise(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -73,14 +73,14 @@ impl JammerState for CalibrateIntervalTimer {
     }
 
     /// Set state change time after launch (this will however be the same as config and initialise)
-    fn launch(&mut self, radio: &mut impl JamBLErHal, parameters: &mut StateParameters) {
+    fn launch(&mut self, radio: &mut impl JamblerHal, parameters: &mut StateParameters) {
         self.state_change_start_time = parameters.current_time;
         self.point_in_sequence = CalibrationSequence::StateChangeToPeriodic;
     }
 
     fn update_state(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -92,7 +92,7 @@ impl JammerState for CalibrateIntervalTimer {
 
     fn handle_radio_interrupt(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -103,7 +103,7 @@ impl JammerState for CalibrateIntervalTimer {
     #[inline(always)]
     fn handle_interval_timer_interrupt(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -159,15 +159,15 @@ impl JammerState for CalibrateIntervalTimer {
 
                 // Ask to go to the idle state
                 // TODO if you want you can, depending on a counter, ask to enter this state again to see how reliable the delays are
-                return_value.state_transition = Some((JamBLErState::Idle, None));
+                return_value.state_transition = Some((JamblerState::Idle, None));
             }
         }
     }
 
     /// Can transition to Idle from any state
-    fn is_valid_transition_from(&mut self, old_state: &JamBLErState) {
+    fn is_valid_transition_from(&mut self, old_state: &JamblerState) {
         match old_state {
-            JamBLErState::Idle => {
+            JamblerState::Idle => {
                 // Can come from idle
             }
             _ => panic!("Going to calibrate interval timer from a non-idle state."),
@@ -175,9 +175,9 @@ impl JammerState for CalibrateIntervalTimer {
     }
 
     /// Should only be ok for start states.
-    fn is_valid_transition_to(&mut self, new_state: &JamBLErState) {
+    fn is_valid_transition_to(&mut self, new_state: &JamblerState) {
         match new_state {
-            JamBLErState::Idle => {
+            JamblerState::Idle => {
                 // Can go to idle
             }
             _ => panic!("Going from calibrate interval timer to a non-idle state."),

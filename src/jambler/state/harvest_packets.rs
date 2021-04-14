@@ -1,7 +1,7 @@
 use super::StateParameters;
 use crate::jambler::state::IntervalTimerRequirements;
 use crate::jambler::state::StateMessage;
-use crate::jambler::JamBLErState;
+use crate::jambler::JamblerState;
 use crate::jambler::StateReturn;
 use heapless::{consts::*, Vec};
 
@@ -14,7 +14,7 @@ use crate::jambler::{PDU, PDU_SIZE};
 
 use super::super::util::TimeStamp;
 
-use super::super::{BlePHY, JamBLErHal};
+use super::super::{BlePhy, JamblerHal};
 use super::JammerState;
 
 use rtt_target::rprintln;
@@ -60,7 +60,7 @@ impl core::fmt::Debug for HarvestedSubEvent {
 /// A harvested packet
 pub struct HarvestedPacket {
     pub pdu: Box<PDU>,
-    pub phy: BlePHY,
+    pub phy: BlePhy,
     pub crc: u32,
     pub rssi: i8,
 }
@@ -102,9 +102,9 @@ pub struct HarvestPackets {
     /// The access address to be listening for.
     access_address: u32,
     /// The PHY the sniffer is listening to
-    phy: BlePHY,
+    phy: BlePhy,
     /// The PHY of the slave
-    slave_phy: BlePHY,
+    slave_phy: BlePhy,
     /// The channels the listener will listen for.
     /// Must not be empty and all elements must be between 0 and 37.
     channel_chain: Vec<u8, U64>,
@@ -145,7 +145,7 @@ impl HarvestPackets {
         let mut total_time = self.current_min_conn_interval * self.number_of_intervals;
 
         // Add other side worst case (500ppm sleep clock accuracy) clock drift
-        total_time += (total_time as f32 * (500 as f32 / 1_000_000 as f32)) as u32 + 1;
+        total_time += (total_time as f32 * (500_f32 / 1_000_000_f32)) as u32 + 1;
 
         // Add the instant tolerance worst case (2 for active, 16 for sleep)
         total_time += 16;
@@ -156,7 +156,7 @@ impl HarvestPackets {
 
         // Add my own worst case interval timer clock accuracy
         total_time +=
-            (total_time as f32 * (self.interval_timer_ppm as f32 / 1_000_000 as f32)) as u32 + 1;
+            (total_time as f32 * (self.interval_timer_ppm as f32 / 1_000_000_f32)) as u32 + 1;
 
         total_time
     }
@@ -164,7 +164,7 @@ impl HarvestPackets {
     /// Lets the radio listen on the next channel.
     /// Return true if the channel chain was completed and wrapped.
     #[inline]
-    fn next_channel(&mut self, radio: &mut impl JamBLErHal, current_time: u64) -> bool {
+    fn next_channel(&mut self, radio: &mut impl JamblerHal, current_time: u64) -> bool {
         let old_channel = self.channel_chain[self.current_channel];
 
         // Change channel
@@ -172,7 +172,7 @@ impl HarvestPackets {
         self.current_channel += 1;
         let wrapped;
         // Wrap around chain when necessary
-        if !(self.current_channel < self.channel_chain.len()) {
+        if self.current_channel >= self.channel_chain.len() {
             self.current_channel = 0;
             wrapped = true;
         } else {
@@ -211,8 +211,8 @@ impl JammerState for HarvestPackets {
         HarvestPackets {
             // Dummy address is the advertising access address.
             access_address: 0x8E89BED6,
-            phy: BlePHY::Uncoded1M,
-            slave_phy: BlePHY::Uncoded1M,
+            phy: BlePhy::Uncoded1M,
+            slave_phy: BlePhy::Uncoded1M,
             channel_chain: Vec::new(),
             current_min_conn_interval: 4_000_000,
             number_of_intervals: 100,
@@ -229,7 +229,7 @@ impl JammerState for HarvestPackets {
     }
 
     /// Returns an error if a required config parameter was missing.
-    fn config(&mut self, radio: &mut impl JamBLErHal, parameters: &mut StateParameters) {
+    fn config(&mut self, radio: &mut impl JamblerHal, parameters: &mut StateParameters) {
         let config = parameters
             .config
             .as_ref()
@@ -318,7 +318,7 @@ impl JammerState for HarvestPackets {
     /// Assumes the radio has been correctly configured.
     fn initialise(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -371,7 +371,7 @@ impl JammerState for HarvestPackets {
         ));
     }
 
-    fn launch(&mut self, radio: &mut impl JamBLErHal, parameters: &mut StateParameters) {
+    fn launch(&mut self, radio: &mut impl JamblerHal, parameters: &mut StateParameters) {
         //TimeStamp::rprint_normal_with_micros_from_microseconds(parameters.current_time);
         //rprintln!("Launched harvesting for packets: \n{:?}.", &self);
 
@@ -389,7 +389,7 @@ impl JammerState for HarvestPackets {
     /// The ppm, number of intervals etc will not be changed either, just restart.
     fn update_state(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -513,7 +513,7 @@ impl JammerState for HarvestPackets {
     #[inline]
     fn handle_radio_interrupt(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -558,7 +558,7 @@ impl JammerState for HarvestPackets {
                                 // Return the subevent, replacing the first buffer we will send of with the newly allocated one
                                 return_value.state_message = Some(StateMessage::HarvestedSubevent(
                                     HarvestedSubEvent {
-                                        channel: channel,
+                                        channel,
                                         time: parameters.current_time,
                                         time_on_the_channel: (parameters.current_time
                                             - self.start_time_current_channel)
@@ -594,7 +594,7 @@ impl JammerState for HarvestPackets {
                                         return_value.state_message =
                                             Some(StateMessage::HarvestedSubevent(
                                                 HarvestedSubEvent {
-                                                    channel: channel,
+                                                    channel,
                                                     time: parameters.current_time,
                                                     time_on_the_channel: (parameters.current_time
                                                         - self.start_time_current_channel)
@@ -627,7 +627,7 @@ impl JammerState for HarvestPackets {
                                         return_value.state_message =
                                             Some(StateMessage::HarvestedSubevent(
                                                 HarvestedSubEvent {
-                                                    channel: channel,
+                                                    channel,
                                                     time: parameters.current_time,
                                                     time_on_the_channel: (parameters.current_time
                                                         - self.start_time_current_channel)
@@ -689,7 +689,7 @@ impl JammerState for HarvestPackets {
     #[inline]
     fn handle_interval_timer_interrupt(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -735,10 +735,10 @@ impl JammerState for HarvestPackets {
     /// Is it valid to go from the self state to the new state.
     /// self -> new_state valid?
     /// Can only go to idle or start harvesting patterns.
-    fn is_valid_transition_to(&mut self, new_state: &JamBLErState) {
+    fn is_valid_transition_to(&mut self, new_state: &JamblerState) {
         match new_state {
             // TODO allow for transition to TestingParameters
-            JamBLErState::Idle => {
+            JamblerState::Idle => {
                 // Can go to idle
             }
             _ => panic!(
@@ -749,9 +749,9 @@ impl JammerState for HarvestPackets {
 
     /// Is it valid to go to the self state from the old_state
     /// new_state -> self valid?
-    fn is_valid_transition_from(&mut self, old_state: &JamBLErState) {
+    fn is_valid_transition_from(&mut self, old_state: &JamblerState) {
         match old_state {
-            JamBLErState::Idle => {
+            JamblerState::Idle => {
                 // Can come here from Idle
             }
             _ => panic!("Can start harvesting packets from the Idle state"),

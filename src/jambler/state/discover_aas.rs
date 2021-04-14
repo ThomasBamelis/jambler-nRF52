@@ -2,13 +2,13 @@ use super::StateParameters;
 use crate::jambler::state::DiscoveredAccessAddress;
 use crate::jambler::state::IntervalTimerRequirements;
 use crate::jambler::state::StateMessage;
-use crate::jambler::JamBLErState;
+use crate::jambler::JamblerState;
 use crate::jambler::StateReturn;
 use heapless::{consts::*, spsc::Queue, Vec};
 
 use super::super::util::TimeStamp;
 
-use super::super::{BlePHY, JamBLErHal};
+use super::super::{BlePhy, JamblerHal};
 use super::JammerState;
 
 use rtt_target::rprintln;
@@ -19,7 +19,7 @@ pub struct DiscoverAas {
     /// A queue holding the access address as an unsigned 32 bit.
     aa_cache: Queue<u32, U255, u8>,
     /// The PHY the sniffer is listening to
-    phy: BlePHY,
+    phy: BlePhy,
     /// The channels the listener will listen for.
     /// Must not be empty and all elements must be between 0 and 37.
     channel_chain: Vec<u8, U64>,
@@ -39,7 +39,7 @@ impl JammerState for DiscoverAas {
     fn new() -> DiscoverAas {
         DiscoverAas {
             aa_cache: Queue::u8(),
-            phy: BlePHY::Uncoded1M,
+            phy: BlePhy::Uncoded1M,
             channel_chain: Vec::new(),
             interval: 0,
             current_channel: 0,
@@ -48,7 +48,7 @@ impl JammerState for DiscoverAas {
 
     /// Configure the parameters for this state.
     /// Sets the PHY, channels and interval to be snooping for
-    fn config(&mut self, radio: &mut impl JamBLErHal, parameters: &mut StateParameters) {
+    fn config(&mut self, radio: &mut impl JamblerHal, parameters: &mut StateParameters) {
         let config = parameters
             .config
             .as_ref()
@@ -98,7 +98,7 @@ impl JammerState for DiscoverAas {
     /// Empty AA cache
     fn initialise(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -120,7 +120,7 @@ impl JammerState for DiscoverAas {
 
     /// Starts receiving
     #[inline]
-    fn launch(&mut self, radio: &mut impl JamBLErHal, parameters: &mut StateParameters) {
+    fn launch(&mut self, radio: &mut impl JamblerHal, parameters: &mut StateParameters) {
         rprintln!("Launched sniffing for AAs.");
 
         // launch the radio
@@ -132,7 +132,7 @@ impl JammerState for DiscoverAas {
     /// It is not very efficient but as long as its not a problem I don't care.
     fn update_state(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -218,7 +218,7 @@ impl JammerState for DiscoverAas {
     #[inline]
     fn handle_radio_interrupt(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -239,7 +239,7 @@ impl JammerState for DiscoverAas {
                     phy: self.phy,
                     channel: self.channel_chain[self.current_channel],
                     time: parameters.current_time,
-                    rssi: rssi,
+                    rssi,
                     sent_by_master: None,
                 }));
         } else {
@@ -253,7 +253,7 @@ impl JammerState for DiscoverAas {
     #[inline]
     fn handle_interval_timer_interrupt(
         &mut self,
-        radio: &mut impl JamBLErHal,
+        radio: &mut impl JamblerHal,
         parameters: &mut StateParameters,
         return_value: &mut StateReturn,
     ) {
@@ -261,7 +261,7 @@ impl JammerState for DiscoverAas {
         // Could do modulo, but I think it is very slow so I do it this way
         self.current_channel += 1;
         // Wrap around chain when necessary
-        if !(self.current_channel < self.channel_chain.len()) {
+        if self.current_channel >= self.channel_chain.len() {
             self.current_channel = 0;
         }
 
@@ -278,9 +278,9 @@ impl JammerState for DiscoverAas {
     }
 
     /// Should only go to the idle state.
-    fn is_valid_transition_to(&mut self, new_state: &JamBLErState) {
+    fn is_valid_transition_to(&mut self, new_state: &JamblerState) {
         match new_state {
-            JamBLErState::Idle => {
+            JamblerState::Idle => {
                 // Can go back to idle
             }
             _ => panic!("Can only transition to Idle from discover AAs."),
@@ -288,9 +288,9 @@ impl JammerState for DiscoverAas {
     }
 
     /// Should only transition to this from the idle state.
-    fn is_valid_transition_from(&mut self, old_state: &JamBLErState) {
+    fn is_valid_transition_from(&mut self, old_state: &JamblerState) {
         match old_state {
-            JamBLErState::Idle => {
+            JamblerState::Idle => {
                 // Can come here from idle state
             }
             _ => panic!("Can only start discovering AAs starting from the Idle state."),

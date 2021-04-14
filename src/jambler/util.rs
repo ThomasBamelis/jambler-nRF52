@@ -16,9 +16,9 @@ pub struct TimeStamp {
 impl TimeStamp {
     pub fn from_microseconds(microseconds: u64) -> TimeStamp {
         TimeStamp {
-            days: (microseconds / (24 * 60 * 60 * 1000_000)) as u32,
-            hours: ((microseconds / (60 * 60 * 1000_000)) % 24) as u8,
-            minutes: ((microseconds / (60 * 1000_000)) % 60) as u8,
+            days: (microseconds / (24 * 60 * 60 * 1_000_000)) as u32,
+            hours: ((microseconds / (60 * 60 * 1_000_000)) % 24) as u8,
+            minutes: ((microseconds / (60 * 1_000_000)) % 60) as u8,
             seconds: ((microseconds / 1_000_000) % 60) as u8,
             milliseconds: ((microseconds / 1000) % 1000) as u16,
             microseconds: (microseconds % 1000) as u16,

@@ -1,7 +1,7 @@
 use hal::pac::TIMER1;
 use nrf52840_hal as hal; // Embedded_hal implementation for my chip
 
-use super::super::JamBLErIntervalTimer;
+use super::super::JamblerIntervalTimer;
 
 use core::sync::atomic::{compiler_fence, Ordering::SeqCst};
 
@@ -24,7 +24,7 @@ impl Nrf52840IntervalTimer {
     }
 }
 
-impl JamBLErIntervalTimer for Nrf52840IntervalTimer {
+impl JamblerIntervalTimer for Nrf52840IntervalTimer {
     /// Sets the interval in microseconds and if the timer should function as a countdown or as a periodic timer.
     #[inline]
     fn config(&mut self, interval: u32, periodic: bool) -> bool {

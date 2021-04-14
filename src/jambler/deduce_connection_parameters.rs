@@ -2,7 +2,7 @@ use gcd::Gcd;
 //use rtt_target::rprintln;
 //use crate::ConnectionSample;
 use super::ConnectionSample;
-use crate::jambler::BlePHY;
+use crate::jambler::BlePhy;
 
 //use heapless::HistoryBuffer;
 use heapless::{consts::*, spsc::Queue, BinaryHeap, binary_heap::Max};
@@ -17,6 +17,8 @@ type ConnectionSampleQueue = Queue<ConnectionSample, U32>;
 type UnusedChannelQueue = Queue<u8, U32>;
 type RecentCrcInitSamples = Queue<u32, U10>;
 type AnchorPoints = Queue<AnchorPoint, U256>;
+/// (CI, Option<(conn_interval, channel_map, absolute_time_start, drift_from_start, crc_init)>)
+type FoundParameters = (CounterInterval, Option<(u32, u64, u64, i64, u32)>);
 
 #[derive(Clone, Copy, PartialEq)]
 enum ChannelMapEntry {
@@ -55,8 +57,8 @@ struct AnchorPoint {
 /// This is the message passing struct between the host and the task.
 pub struct DeduceConnectionParametersControl {
     pub access_address: u32,
-    pub master_phy: BlePHY,
-    pub slave_phy: BlePHY,
+    pub master_phy: BlePhy,
+    pub slave_phy: BlePhy,
     pub connection_sample_queue: ConnectionSampleQueue, // TODO split into producer and consumer
     pub unused_channel_queue: UnusedChannelQueue,
     pub reset: bool,
@@ -69,17 +71,23 @@ impl DeduceConnectionParametersControl {
             connection_sample_queue: Queue::new(),
             unused_channel_queue: Queue::new(),
             reset: false,
-            master_phy: BlePHY::Uncoded1M,
-            slave_phy: BlePHY::Uncoded1M,
+            master_phy: BlePhy::Uncoded1M,
+            slave_phy: BlePhy::Uncoded1M,
         }
     }
 
     /// Resets the control block and returns the access address it holds.
-    pub fn reset(&mut self) -> (u32, BlePHY, BlePHY) {
+    pub fn reset(&mut self) -> (u32, BlePhy, BlePhy) {
         self.connection_sample_queue = Queue::new();
         self.unused_channel_queue = Queue::new();
         self.reset = false;
         (self.access_address, self.master_phy, self.slave_phy)
+    }
+}
+
+impl Default for DeduceConnectionParametersControl {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -94,8 +102,8 @@ pub struct DeductionState {
     absolute_time_reference_point: u64,
     time_prev_anchor_point : u64,
     access_address: u32,
-    master_phy: BlePHY,
-    slave_phy: BlePHY,
+    master_phy: BlePhy,
+    slave_phy: BlePhy,
     recent_crc_init_samples: RecentCrcInitSamples,
     anchor_points: AnchorPoints,
     /// Indicates wether we started processing already because we thought we had the correct connInterval, crc init and channel map
@@ -115,8 +123,8 @@ impl DeductionState {
             absolute_time_reference_point: core::u64::MAX,
             time_prev_anchor_point: 0,
             access_address: 0,
-            master_phy: BlePHY::Uncoded1M,
-            slave_phy: BlePHY::Uncoded1M,
+            master_phy: BlePhy::Uncoded1M,
+            slave_phy: BlePhy::Uncoded1M,
             recent_crc_init_samples: Queue(heapless::i::Queue::new()), // Should be HISTORY BUFFER
             /// TODO Should be HISTORY BUFFER OR MIN BINARYHEAP SORTED ON TIME SO IT WILL ALWAYS BE ORDENED FOR MULTIPLE DEVICES
             anchor_points: Queue(heapless::i::Queue::new()), // Should be HISTORY BUFFER OR MIN BINARYHEAP SORTED ON TIME SO IT WILL ALWAYS BE ORDENED FOR MULTIPLE DEVICES
@@ -127,7 +135,7 @@ impl DeductionState {
         }
     }
 
-    pub fn reset(&mut self, new_access_address: u32, master_phy: BlePHY, slave_phy: BlePHY) {
+    pub fn reset(&mut self, new_access_address: u32, master_phy: BlePhy, slave_phy: BlePhy) {
         self.channel_map = [ChannelMapEntry::Unknown; 37];
         self.crc_init = core::u32::MAX;
         // the maximum observed connection interval in microseconds
@@ -155,11 +163,11 @@ impl DeductionState {
         self.access_address
     }
 
-    pub fn get_master_phy(&self) -> BlePHY {
+    pub fn get_master_phy(&self) -> BlePhy {
         self.master_phy
     }
 
-    pub fn get_slave_phy(&self) -> BlePHY {
+    pub fn get_slave_phy(&self) -> BlePhy {
         self.slave_phy
     }
 
@@ -316,7 +324,7 @@ impl DeductionState {
     /// The channel map array, drift and conn_interval are only computed here.
     pub fn process_interval_simple(
         &mut self
-    ) -> (CounterInterval, Option<(u32, u64, u64, i64, u32)>) {
+    ) -> FoundParameters {
         if !self.processing {
             return (CounterInterval::Unknown, None);
         }
@@ -419,8 +427,8 @@ impl DeductionState {
         static CODED_S2_SEND_TIME: u32 = 4542; // AA, CI, TERM1 in S8
         static CODED_S8_SEND_TIME: u32 = 17040;
         // TODO get from connection sample or also from reset
-        let actual_slave_phy: BlePHY = self.slave_phy;
-        let actual_master_phy: BlePHY = self.master_phy;
+        let actual_slave_phy: BlePhy = self.slave_phy;
+        let actual_master_phy: BlePhy = self.master_phy;
 
         // THE RADIO ONLY LISTENS ON MASTER PHY FIRST
         // Does not matter if you caught response or not
@@ -430,24 +438,24 @@ impl DeductionState {
             // If they are the same, return either one
             // You would have caught the previous packet either way because same phy
             match actual_master_phy {
-                BlePHY::Uncoded1M => UNCODED_1M_SEND_TIME,
-                BlePHY::Uncoded2M => UNCODED_2M_SEND_TIME,
-                BlePHY::CodedS2 => CODED_S2_SEND_TIME,
-                BlePHY::CodedS8 => CODED_S8_SEND_TIME,
+                BlePhy::Uncoded1M => UNCODED_1M_SEND_TIME,
+                BlePhy::Uncoded2M => UNCODED_2M_SEND_TIME,
+                BlePhy::CodedS2 => CODED_S2_SEND_TIME,
+                BlePhy::CodedS8 => CODED_S8_SEND_TIME,
             }
         } else {
             // If they are different, jambler would not have caught the previous one because it was listening on the wrong phy and we actually have to go back the full subevent
             let m_time = match actual_master_phy {
-                BlePHY::Uncoded1M => UNCODED_1M_SEND_TIME,
-                BlePHY::Uncoded2M => UNCODED_2M_SEND_TIME,
-                BlePHY::CodedS2 => CODED_S2_SEND_TIME,
-                BlePHY::CodedS8 => CODED_S8_SEND_TIME,
+                BlePhy::Uncoded1M => UNCODED_1M_SEND_TIME,
+                BlePhy::Uncoded2M => UNCODED_2M_SEND_TIME,
+                BlePhy::CodedS2 => CODED_S2_SEND_TIME,
+                BlePhy::CodedS8 => CODED_S8_SEND_TIME,
             };
             let s_time = match actual_slave_phy {
-                BlePHY::Uncoded1M => UNCODED_1M_SEND_TIME,
-                BlePHY::Uncoded2M => UNCODED_2M_SEND_TIME,
-                BlePHY::CodedS2 => CODED_S2_SEND_TIME,
-                BlePHY::CodedS8 => CODED_S8_SEND_TIME,
+                BlePhy::Uncoded1M => UNCODED_1M_SEND_TIME,
+                BlePhy::Uncoded2M => UNCODED_2M_SEND_TIME,
+                BlePhy::CodedS2 => CODED_S2_SEND_TIME,
+                BlePhy::CodedS8 => CODED_S8_SEND_TIME,
             };
             m_time + 150 + s_time
         };
@@ -503,13 +511,13 @@ impl DeductionState {
     /// Turns the channel map entries into a u64 bit mask
     fn channel_map_entries_to_mask(entries: &[ChannelMapEntry; 37]) -> u64 {
         let mut channel_map_in_u64: u64 = 0;
-        for channel in 0..entries.len() {
+        (0..entries.len()).for_each(|channel| {
             if let ChannelMapEntry::Used = entries[channel] {
                 channel_map_in_u64 |= 1 << channel;
             } else if entries[channel] != ChannelMapEntry::Unused {
                 panic!("Channel map was not complete in used/unused when trying to create a u64 mask for it")
             }
-        }
+        });
         channel_map_in_u64
     }
 
@@ -582,7 +590,7 @@ fn csa2_no_subevent(
     prn_e = mam(prn_e, channel_identifier); // mam
     prn_e = perm(prn_e); // perm
     prn_e = mam(prn_e, channel_identifier); // mam
-    prn_e = prn_e ^ channel_identifier;
+    prn_e ^= channel_identifier;
 
     // figure 4.47
     let unmapped_channel: u8 = (prn_e % 37) as u8;
@@ -669,7 +677,7 @@ pub fn reverse_calculate_crc_init(received_crc_value: u32, pdu: &[u8], pdu_lengt
         ret |= ((state >> i) & 1) << (23 - i);
     }
 
-    return ret;
+    ret
 }
 
 
@@ -685,12 +693,12 @@ fn reverse_bits_u32(byte: u32) -> u32 {
     // Go right to left over original byte, building and shifting the reversed one in the process
     for bit_index in 0..32 {
         // Move to left to make room for new bit on the right (new LSB)
-        reversed_byte = reversed_byte << 1;
+        reversed_byte <<= 1;
         // If byte is 1 in its indexed place, set 1 to right/LSB reversed
         if byte & (1 << bit_index) != 0 {
-            reversed_byte = reversed_byte | 0b0000_0001;
+            reversed_byte |= 0b0000_0001;
         } else {
-            reversed_byte = reversed_byte | 0b0000_0000;
+            reversed_byte |= 0b0000_0000;
         }
         //reversed_byte |= if byte & (1 << bit_index) != 0 {0b0000_0001} else {0b0000_0000};
     }
