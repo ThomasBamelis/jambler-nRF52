@@ -50,7 +50,6 @@ struct AnchorPoint {
     pub time_diff_with_prev: u64,
 }
 
-type AnchorPointQueue = Queue<AnchorPoint, U256>;
 
 /// A wrapper for all necessary control information for the task used for deducing connection parameters.
 /// This is the message passing struct between the host and the task.
@@ -58,7 +57,7 @@ pub struct DeduceConnectionParametersControl {
     pub access_address: u32,
     pub master_phy: BlePHY,
     pub slave_phy: BlePHY,
-    pub connection_sample_queue: ConnectionSampleQueue,
+    pub connection_sample_queue: ConnectionSampleQueue, // TODO split into producer and consumer
     pub unused_channel_queue: UnusedChannelQueue,
     pub reset: bool,
 }
@@ -150,10 +149,6 @@ impl DeductionState {
 
     pub fn get_nb_packets(&self) -> u32 {
         self.total_packets
-    }
-
-    pub fn get_nb_anchor_points(&self) -> u32 {
-        self.anchor_points.len() as u32
     }
 
     pub fn get_access_address(&self) -> u32 {
@@ -677,70 +672,6 @@ pub fn reverse_calculate_crc_init(received_crc_value: u32, pdu: &[u8], pdu_lengt
     return ret;
 }
 
-/// TODO use the crc_any crate, most likely much faster
-pub fn calculate_crc(crc_init: u32, pdu: &[u8], pdu_length: u16) -> u32 {
-    // put crc_init in state, MSB to LSB (MSB right)
-
-    let mut state: u32 = 0;
-    for i in 0..24 {
-        state |= ((crc_init >> i) & 1) << (23 - i);
-    }
-    let lfsr_mask: u32 = 0b0101_1010_0110_0000_0000_0000;
-
-    // loop over the pdu bits (as sent over the air)
-    // The first processed bis it the 0bxxxx_xxx1 bit of the byte at index 0 of the given pdu
-    for byte_number in 0..pdu_length {
-        let current_byte: u8 = pdu[byte_number as usize];
-        for bit_position in 0..8 {
-            // Pop position 23 x^24
-            let old_position_23: u8 = (state & 1) as u8;
-            // Shift the register to the right
-            state = state >> 1;
-            // Get the data in bit
-            let data_in = (current_byte >> bit_position) & 1;
-            // calculate x^24 = new position 0 and put it in 24th bit
-            let new_position_0 = (old_position_23 ^ data_in) as u32;
-            state |= new_position_0 << 23;
-            // if the new position is not 0, xor the register pointed to by a xor with 1
-            if new_position_0 != 0 {
-                state ^= lfsr_mask;
-            }
-        }
-    }
-
-    // Position 0 is the LSB of the init value, 23 the MSB (p2924 specifications)
-    // So reverse it into a result u32
-    //let mut ret : u32 = 0;
-    // Go from CRC_init most significant to least = pos23->pos0
-    //for i in 0..24 {
-    //	ret |= ((state >> i) & 1) << (23 - i);
-    //}
-
-    return reverse_bits_u32(state) >> 8;
-}
-
-/// TODO use the trick below
-/// ```
-/// input = ((input & 0xaaaa) >> 1) | ((input & 0x5555) << 1);
-/// input = ((input & 0xcccc) >> 2) | ((input & 0x3333) << 2);
-/// input = ((input & 0xf0f0) >> 4) | ((input & 0x0f0f) << 4);
-/// ```
-fn reverse_bits(byte: u8) -> u8 {
-    let mut reversed_byte: u8 = 0;
-    // Go right to left over original byte, building and shifting the reversed one in the process
-    for bit_index in 0..8 {
-        // Move to left to make room for new bit on the right (new LSB)
-        reversed_byte = reversed_byte << 1;
-        // If byte is 1 in its indexed place, set 1 to right/LSB reversed
-        if byte & (1 << bit_index) != 0 {
-            reversed_byte = reversed_byte | 0b0000_0001;
-        } else {
-            reversed_byte = reversed_byte | 0b0000_0000;
-        }
-        //reversed_byte |= if byte & (1 << bit_index) != 0 {0b0000_0001} else {0b0000_0000};
-    }
-    reversed_byte
-}
 
 /// TODO use the trick below, but adapt. now it contains each byte reversed, so now reverse the bytes using 0xff00ff00 >> 8, 0x00ff00ff << 8 and 0xffff0000 >> 16, 0x0000ffff << 16
 /// TODO NOPE JUST USE CRC_ANY CRATE, THESE FUNCTION WILL NOT BE NECESSARY ANYMORE THEN
@@ -753,23 +684,6 @@ fn reverse_bits_u32(byte: u32) -> u32 {
     let mut reversed_byte: u32 = 0;
     // Go right to left over original byte, building and shifting the reversed one in the process
     for bit_index in 0..32 {
-        // Move to left to make room for new bit on the right (new LSB)
-        reversed_byte = reversed_byte << 1;
-        // If byte is 1 in its indexed place, set 1 to right/LSB reversed
-        if byte & (1 << bit_index) != 0 {
-            reversed_byte = reversed_byte | 0b0000_0001;
-        } else {
-            reversed_byte = reversed_byte | 0b0000_0000;
-        }
-        //reversed_byte |= if byte & (1 << bit_index) != 0 {0b0000_0001} else {0b0000_0000};
-    }
-    reversed_byte
-}
-
-fn reverse_bits_u64(byte: u64) -> u64 {
-    let mut reversed_byte: u64 = 0;
-    // Go right to left over original byte, building and shifting the reversed one in the process
-    for bit_index in 0..64 {
         // Move to left to make room for new bit on the right (new LSB)
         reversed_byte = reversed_byte << 1;
         // If byte is 1 in its indexed place, set 1 to right/LSB reversed

@@ -2,17 +2,16 @@ use crate::jambler::HalHarvestedPacket;
 use hal::pac::RADIO;
 use nrf52840_hal as hal; // Embedded_hal implementation for my chip
 
-use super::super::{JamBLErHal, JamBLErHalError};
+use super::super::{JamBLErHal};
 use crate::jambler::BlePHY;
 
 use core::sync::atomic::{compiler_fence, Ordering::SeqCst};
 
 use rtt_target::rprintln;
 
-use crate::jambler::{PDU, PDU_SIZE};
+use crate::jambler::{PDU};
 use heapless::{
-    pool,
-    pool::singleton::{Box, Pool},
+    pool::singleton::{Box},
 };
 
 /// A struct for altering the radio module of the nrf52840.
@@ -1126,9 +1125,9 @@ pub fn calculate_crc(crc_init: u32, pdu: &[u8], pdu_length: u16) -> u32 {
 
     // loop over the pdu bits (as sent over the air)
     // The first processed bis it the 0bxxxx_xxx1 bit of the byte at index 0 of the given pdu
-    for byte_number in (0..pdu_length) {
+    for byte_number in 0..pdu_length {
         let current_byte: u8 = pdu[byte_number as usize];
-        for bit_position in (0..8) {
+        for bit_position in 0..8 {
             // Pop position 23 x^24
             let old_position_23: u8 = (state & 1) as u8;
             // Shift the register to the right
@@ -1241,13 +1240,6 @@ fn dewithen_16_bit_pdu_header(first_byte: u8, second_byte: u8, channel: u8) -> (
 /// For now like this to not introduce bugs early for no reason.
 #[inline]
 fn is_valid_aa(aa: u32, phy: BlePHY) -> bool {
-    // TODO change, debugging to listen to mine
-
-    if aa == 0x8E89BED6 {
-        return true;
-    } else {
-        return false;
-    }
 
     // not more then 6 consecutive 0s
     let mut zero_count = 0;

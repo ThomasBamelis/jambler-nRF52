@@ -1,8 +1,6 @@
 use super::StateParameters;
 use crate::jambler::state::DiscoveredAccessAddress;
 use crate::jambler::state::IntervalTimerRequirements;
-use crate::jambler::state::StateConfig;
-use crate::jambler::state::StateError;
 use crate::jambler::state::StateMessage;
 use crate::jambler::JamBLErState;
 use crate::jambler::StateReturn;
@@ -292,7 +290,7 @@ impl JammerState for DiscoverAas {
     /// Should only transition to this from the idle state.
     fn is_valid_transition_from(&mut self, old_state: &JamBLErState) {
         match old_state {
-            Idle => {
+            JamBLErState::Idle => {
                 // Can come here from idle state
             }
             _ => panic!("Can only start discovering AAs starting from the Idle state."),

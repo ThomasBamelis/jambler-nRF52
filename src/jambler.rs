@@ -4,14 +4,13 @@ mod state;
 mod util;
 
 use crate::jambler::state::harvest_packets::HarvestedSubEvent;
-use crate::jambler::util::TimeStamp;
 
 // Re-export hardware implementations for user
 pub use hardware_traits::nrf52840;
 use heapless::Vec;
 
 use hardware_traits::*;
-use heapless::{consts::*, String};
+use heapless::{consts::*};
 use state::IntervalTimerRequirements;
 use state::StateConfig;
 use state::StateStore;
@@ -19,11 +18,10 @@ use state::{StateMessage, StateParameters, StateReturn};
 
 use rtt_target::rprintln;
 
-use core::mem::{replace, swap};
 
 use heapless::{
     pool,
-    pool::singleton::{Box, Pool},
+    pool::singleton::{Pool},
 };
 
 // This is a sort of heap I make myself, but it is not a general purpose heap
@@ -110,7 +108,7 @@ pub enum JamBLErTask {
 
 impl<H: JamBLErHal, T: JamBLErTimer, I: JamBLErIntervalTimer> JamBLEr<H, T, I> {
     pub fn new(
-        mut jammer_hal: H,
+        jammer_hal: H,
         mut jammer_timer: T,
         jammer_interval_timer: I,
     ) -> JamBLEr<H, T, I> {

@@ -5,7 +5,6 @@ use super::super::JamBLErIntervalTimer;
 
 use core::sync::atomic::{compiler_fence, Ordering::SeqCst};
 
-use rtt_target::rprintln;
 
 /// A timer for countdowns and periods using timer 1 on the nrf.
 ///

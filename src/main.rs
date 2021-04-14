@@ -1,7 +1,10 @@
 #![no_std]
 #![no_main]
+
 // TODO delete, warnings are a pain in the ass when trying to work quickly
 //#![allow(warnings)]
+#![allow(unused_variables)]
+#![allow(dead_code)]
 
 use crate::jambler::BlePHY;
 use crate::jambler::ConnectionSample;
@@ -22,12 +25,9 @@ mod serial;
 use crate::serial::SerialController;
 use heapless::spsc::Queue;
 use heapless::{consts::*, String};
-use heapless::{
-    pool,
-    pool::singleton::{Box, Pool},
-};
+
 // Our pseudo PDU heap
-use crate::jambler::{initialise_pdu_heap, PDU, PDU_SIZE};
+use crate::jambler::{initialise_pdu_heap, PDU_SIZE};
 const JAMBLER_RETURN_CAPACITY: u8 = 5;
 
 
@@ -224,11 +224,11 @@ const APP: () = {
     /// A handler for UART1
     /// UART1 is only available on the nrf52840, sorry not sorry
     #[task(binds = UARTE1 ,priority = 5, resources = [uarte], spawn = [cli_command_dispatcher])]
-    fn handle_uart(mut ctx: handle_uart::Context) {
+    fn handle_uart(ctx: handle_uart::Context) {
         // get the resource
         let uarte: &mut SerialController = ctx.resources.uarte;
 
-        if let Some(mut cli_command) = uarte.handle_interrupt() {
+        if let Some(cli_command) = uarte.handle_interrupt() {
             ctx.spawn.cli_command_dispatcher(cli_command).unwrap();
         }
     }
@@ -267,7 +267,7 @@ const APP: () = {
     /// then grow in init
     ///
     /// WILL BE DIFFERENT FOR SLAVES AND MASTERS, DO THIS ONE IN HERE
-    #[task(priority = 4, capacity = 5, resources = [jambler, dcp_control], spawn = [RTIC_controller, deduce_connection_parameters])]
+    #[task(priority = 4, capacity = 5, resources = [jambler, dcp_control], spawn = [rtic_controller, deduce_connection_parameters])]
     fn handle_jambler_return(
         mut ctx: handle_jambler_return::Context,
         jambler_return: JamBLErReturn,
@@ -277,9 +277,9 @@ const APP: () = {
             JamBLErReturn::InitialisationComplete => {
                 // Go to the next initialisation step, uart in this case for now
                 ctx.spawn
-                    .RTIC_controller(RTICControllerAction::NextInitialisationStep(
+                    .rtic_controller(RTICControllerAction::NextInitialisationStep(
                         InitialisationSequence::InitialiseUart,
-                    ));
+                    )).unwrap();
             }
             JamBLErReturn::HarvestedSubEvent(harvested_subevent, completed_channel_chain) => {
                 // turn the harvested subevent into a small and easily digested connection sample (reversing the crc is way too heavy to do in interrupt handler)
@@ -444,8 +444,8 @@ const APP: () = {
     ///
     /// The responsibility of this task is to be a central point to avoid code duplication.
     #[task(priority = 2, resources = [jambler, uarte], spawn = [ initialise_late_resources])]
-    fn RTIC_controller(
-        mut ctx: RTIC_controller::Context,
+    fn rtic_controller(
+        ctx: rtic_controller::Context,
         rtic_controller_action: RTICControllerAction,
     ) {
         match rtic_controller_action {
@@ -541,10 +541,6 @@ const APP: () = {
                             jambler.execute_task(jambler_task);
                         });
                     }
-                    _ => {
-                        // Unexpected command parsed
-                        panic!()
-                    }
                 }
             }
             None => {
@@ -579,14 +575,13 @@ const APP: () = {
             "A static variable can be declared within a function, which makes it inaccessible outside of the function; however, this doesn't affect its lifetime (it isn't dropped at the end of the function)."
             So I think the initialisation is not done when this function starts, but at compile time and it is never run at runtime.
         */
-        static mut deduction_state: DeductionState = DeductionState::new();
+        static mut DEDUCTION_STATE: DeductionState = DeductionState::new();
 
 
         /*                   BOOTING UP of the task                    */
 
         // Set locals used for control flow
         let mut new_information = true; // Assume we got called because of some new information
-        let mut loop_counter : u32 = 0;
 
 
         /*                        Work loop                           */
@@ -612,17 +607,14 @@ const APP: () = {
                 });
 
                 // reset deduction state (persistent between tasks)
-                deduction_state.reset(new_access_address, master_phy, slave_phy);
-
-                // reset locals (non-persistent between tasks)
-                new_information = true;
+                DEDUCTION_STATE.reset(new_access_address, master_phy, slave_phy);
             }
 
             // Automatically borrows &mut
             let mut opt_conn: Option<u32> = None;
             let mut opt_crci: Option<u32> = None;
             ctx.resources.dcp_control.lock(|dcp_control| {
-                let optional_new_time_delta_or_crc_init = deduction_state.process_new_information_simple(
+                let optional_new_time_delta_or_crc_init = DEDUCTION_STATE.process_new_information_simple(
                 &mut dcp_control.connection_sample_queue,
                 &mut dcp_control.unused_channel_queue,
                 );
@@ -633,16 +625,16 @@ const APP: () = {
             new_information = false;
 
             if let Some(smallest_delta) = opt_conn {
-                rprintln!("Sniffed packet (in same chunk) {} -> New smallest delta: {}", deduction_state.get_nb_packets() , smallest_delta);
+                rprintln!("Sniffed packet (in same chunk) {} -> New smallest delta: {}", DEDUCTION_STATE.get_nb_packets() , smallest_delta);
             }
 
             if let Some(crc_init) = opt_crci {
-                rprintln!("Sniffed packet (in same chunk) {} -> New crc init: {}", deduction_state.get_nb_packets(), crc_init);
+                rprintln!("Sniffed packet (in same chunk) {} -> New crc init: {}", DEDUCTION_STATE.get_nb_packets(), crc_init);
             }
 
 
             // Do a run for a connection interval
-            let (counter_result, other_params_option) = deduction_state.process_interval_simple();
+            let (counter_result, other_params_option) = DEDUCTION_STATE.process_interval_simple();
 
             match &counter_result {
                 CounterInterval::NoSolutions => {
@@ -652,19 +644,18 @@ const APP: () = {
                     });
                 },
                 CounterInterval::MultipleSolutions(_) => {
-                    rprintln!("Not enough info after {} packets", deduction_state.get_nb_packets());
+                    rprintln!("Not enough info after {} packets", DEDUCTION_STATE.get_nb_packets());
                 },
-                CounterInterval::ExactlyOneSolution(counter, version) => {
+                CounterInterval::ExactlyOneSolution(counter, _) => {
                     let (conn_interval, channel_map, absolute_time_found_counter, drift, crc_init) = other_params_option.expect("Other params not supplied on exactly one solution.");
                     let counter = *counter;
-                    let aa = deduction_state.get_access_address();
-                    let mp = deduction_state.get_master_phy();
-                    let sp = deduction_state.get_slave_phy();
+                    let aa = DEDUCTION_STATE.get_access_address();
+                    let mp = DEDUCTION_STATE.get_master_phy();
+                    let sp = DEDUCTION_STATE.get_slave_phy();
                     rprintln!("Exactly one solution! Report back:\nConn_interval: {}\nChannel map: {:#039b}\nAbsolute start time: {}us\nDrift since start {}us\nCounter at start: {}\nCrc init: {:#08X}\nAccess Address {}\nMaster phy: {}\nSlave phy: {}", conn_interval, channel_map, absolute_time_found_counter, drift, counter, crc_init, aa, mp, sp);
                 },
                 CounterInterval::Unknown => {
                 }
-                _ => {}
             }
 
 
@@ -678,7 +669,6 @@ const APP: () = {
                     new_information = true;
                 }
             });
-            loop_counter += 1;
         }
     }
 

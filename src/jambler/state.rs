@@ -6,12 +6,11 @@ pub mod idle;
 /// Jammer states trait
 /// This will handle the ugly truth of avoiding dynamic dispatch.
 use crate::jambler::state::harvest_packets::HarvestedSubEvent;
-use heapless::{consts::*, String, Vec};
+use heapless::{consts::*, Vec};
 
 use super::JamBLErHalError;
 use super::{BlePHY, JamBLErHal, JamBLErState};
 
-use rtt_target::rprintln;
 
 /// Errors a state can give.
 #[derive(Clone, Debug)]
@@ -414,7 +413,6 @@ impl StateStore {
             }
         };
 
-        let state_return;
 
         // configure the state, initialise it, get its timing requirements
         // and launch it.
@@ -425,7 +423,7 @@ impl StateStore {
                 // This is identical for every case
                 state.is_valid_transition_from(&self.current_state);
                 state.config(radio, parameters);
-                state_return = state.initialise(radio, parameters, return_value);
+                state.initialise(radio, parameters, return_value);
                 state.launch(radio, parameters);
             }
             JamBLErState::DiscoveringAAs => {
@@ -433,7 +431,7 @@ impl StateStore {
 
                 state.is_valid_transition_from(&self.current_state);
                 state.config(radio, parameters);
-                state_return = state.initialise(radio, parameters, return_value);
+                state.initialise(radio, parameters, return_value);
                 state.launch(radio, parameters);
             }
             JamBLErState::HarvestingPackets => {
@@ -441,7 +439,7 @@ impl StateStore {
 
                 state.is_valid_transition_from(&self.current_state);
                 state.config(radio, parameters);
-                state_return = state.initialise(radio, parameters, return_value);
+                state.initialise(radio, parameters, return_value);
                 state.launch(radio, parameters);
             }
             JamBLErState::CalibrateIntervalTimer => {
@@ -449,7 +447,7 @@ impl StateStore {
 
                 state.is_valid_transition_from(&self.current_state);
                 state.config(radio, parameters);
-                state_return = state.initialise(radio, parameters, return_value);
+                state.initialise(radio, parameters, return_value);
                 state.launch(radio, parameters);
             }
         };
@@ -457,7 +455,6 @@ impl StateStore {
         self.current_state = new_state.clone();
 
         // The states will adapt the return value struct as needed
-        //Ok(state_return)
     }
 
     /// Updates the state.

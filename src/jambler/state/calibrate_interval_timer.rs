@@ -1,11 +1,9 @@
 use super::super::JamBLErHal;
 use super::JammerState;
-use super::StateConfig;
 use super::StateMessage;
 use super::StateParameters;
 use super::StateReturn;
 use crate::jambler::state::IntervalTimerRequirements;
-use crate::jambler::state::StateError;
 use crate::jambler::JamBLErState;
 
 #[derive(Clone)]

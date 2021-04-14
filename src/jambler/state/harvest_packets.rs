@@ -1,17 +1,11 @@
 use super::StateParameters;
-use crate::jambler::state::DiscoveredAccessAddress;
 use crate::jambler::state::IntervalTimerRequirements;
-use crate::jambler::state::StateConfig;
-use crate::jambler::state::StateError;
 use crate::jambler::state::StateMessage;
-use crate::jambler::HalHarvestedPacket;
-use crate::jambler::JamBLErHalError;
 use crate::jambler::JamBLErState;
 use crate::jambler::StateReturn;
-use heapless::{consts::*, spsc::Queue, Vec};
+use heapless::{consts::*, Vec};
 
 use heapless::{
-    pool,
     pool::singleton::{Box, Pool},
 };
 
@@ -331,7 +325,7 @@ impl JammerState for HarvestPackets {
         // TODO example of getting an unitialisee master pdu you can use
         // To get a pointer I have to initialise them, which takes a lot of time...
         let mut master_pdu = PDU::alloc().unwrap().init([0; 258]);
-        let mut slave_pdu = PDU::alloc().unwrap().init([0; 258]);
+        let slave_pdu = PDU::alloc().unwrap().init([0; 258]);
         let master_ref = &mut master_pdu;
         // The buffer pointer you should give to your peripheral
         let p = master_ref.as_ptr() as u32;
@@ -402,7 +396,7 @@ impl JammerState for HarvestPackets {
         // remember the current channel index
         let cur_chan = self.current_channel;
 
-        let mut interval_change;
+        let interval_change;
 
         // TODO channel_chain update. For multiple devices, after this one has done its job so he can help with more unlucky ones which had a lot of unused channels. However, maybe just let this state finish? You will always rely on outside jambler sources to transition which is basically a new task. I dunno, see later
 

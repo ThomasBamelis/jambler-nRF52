@@ -1,10 +1,7 @@
 use super::super::JamBLErHal;
 use super::JammerState;
-use super::StateConfig;
 use super::StateParameters;
 use super::StateReturn;
-use crate::jambler::state::IntervalTimerRequirements;
-use crate::jambler::state::StateError;
 use crate::jambler::JamBLErState;
 
 pub struct Idle {}
@@ -72,6 +69,7 @@ impl JammerState for Idle {
     }
 
     /// Should only be ok for start states.
+    #[allow(unreachable_patterns)]
     fn is_valid_transition_to(&mut self, new_state: &JamBLErState) {
         match new_state {
             JamBLErState::Idle

@@ -1,10 +1,9 @@
 pub mod nrf52840;
 
 use super::BlePHY;
-use super::{PDU, PDU_SIZE};
+use super::{PDU};
 use heapless::{
-    pool,
-    pool::singleton::{Box, Pool},
+    pool::singleton::{Box},
 };
 
 #[derive(Debug, Clone)]

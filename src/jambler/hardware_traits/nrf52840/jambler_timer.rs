@@ -3,7 +3,6 @@ use nrf52840_hal as hal; // Embedded_hal implementation for my chip
 
 use super::super::JamBLErTimer;
 use core::sync::atomic::{compiler_fence, Ordering::SeqCst};
-use rtt_target::rprintln;
 
 /// A struct for using a timer on the nrf for ble.
 /// Wraps around Timer 2 of the nrf52480, with a prescaler of 4 and 32-bit counter,

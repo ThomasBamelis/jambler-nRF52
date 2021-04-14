@@ -12,6 +12,7 @@ pub struct TimeStamp {
     original_micro_seconds: u64,
 }
 
+#[allow(dead_code)]
 impl TimeStamp {
     pub fn from_microseconds(microseconds: u64) -> TimeStamp {
         TimeStamp {
